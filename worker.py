@@ -110,39 +110,51 @@ def fetch_jpx_prime():
             col_map["industry"] = col
         elif "規模区分" in c:
             col_map["size"] = col
+        elif "規模コード" in c:
+            col_map["size_code"] = col
     return df, col_map
 
 def get_sector_targets(sector_df, col_map):
     """
-    大型株を全件取得し、中型株・小型株で30社まで補完。
-    規模区分列がない場合は先頭30社を返す。
+    規模コード（数値）でソートして上位30社を取得。
+    規模コードが小さいほど大型（1=大型、2=中型、3=小型）。
+    規模コードがない場合は規模区分テキストでソート。
     """
-    if "size" not in col_map or col_map["size"] not in sector_df.columns:
-        print("  size column not found, using head 30")
-        return sector_df.head(30)
+    df = sector_df.copy()
 
-    size_col = col_map["size"]
-    large  = sector_df[sector_df[size_col].astype(str).str.contains("大型")]
-    medium = sector_df[sector_df[size_col].astype(str).str.contains("中型")]
-    small  = sector_df[sector_df[size_col].astype(str).str.contains("小型")]
+    # 規模コード（数値）が使える場合
+    if "size_code" in col_map and col_map["size_code"] in df.columns:
+        df["_sort"] = pd.to_numeric(df[col_map["size_code"]], errors="coerce").fillna(99)
+        df = df.sort_values("_sort")
+        print("  sorted by size_code: " + str(df["_sort"].unique().tolist()[:5]))
+        return df.head(30)
 
-    print("  large:" + str(len(large)) + " medium:" + str(len(medium)) + " small:" + str(len(small)))
+    # 規模区分テキストが使える場合
+    if "size" in col_map and col_map["size"] in df.columns:
+        size_vals = df[col_map["size"]].astype(str).str.strip().unique().tolist()
+        print("  size values: " + str(size_vals))
 
-    targets = large.copy()
+        # 大型・中型・小型の順でソート用数値を付与
+        def size_rank(v):
+            v = str(v).strip()
+            if "大型" in v or "large" in v.lower():
+                return 1
+            elif "中型" in v or "mid" in v.lower():
+                return 2
+            elif "小型" in v or "small" in v.lower():
+                return 3
+            else:
+                return 99
 
-    remaining = 30 - len(targets)
-    if remaining > 0:
-        targets = pd.concat([targets, medium.head(remaining)])
+        df["_sort"] = df[col_map["size"]].apply(size_rank)
+        df = df.sort_values("_sort")
+        large_count = len(df[df["_sort"] == 1])
+        print("  large:" + str(large_count) + " total:" + str(len(df)))
+        return df.head(30)
 
-    remaining = 30 - len(targets)
-    if remaining > 0:
-        targets = pd.concat([targets, small.head(remaining)])
-
-    if len(targets) == 0:
-        print("  fallback: using head 30")
-        return sector_df.head(30)
-
-    return targets
+    # どちらもない場合はそのまま先頭30社
+    print("  no size info, using head 30")
+    return df.head(30)
 
 def check_dividend_history(ticker):
     try:
@@ -388,9 +400,10 @@ def main():
     jpx_df = df[df[col_map["market"]].astype(str).str.contains("プライム")].copy()
     print("prime rows: " + str(len(jpx_df)))
 
-    # 規模区分の実際の値をログ出力して確認
     if "size" in col_map:
-        print("size values: " + str(jpx_df[col_map["size"]].unique().tolist()))
+        print("size sample values: " + str(jpx_df[col_map["size"]].dropna().unique().tolist()[:10]))
+    if "size_code" in col_map:
+        print("size_code sample values: " + str(jpx_df[col_map["size_code"]].dropna().unique().tolist()[:10]))
 
     jpx_df[col_map["code"]] = (
         jpx_df[col_map["code"]]
@@ -423,7 +436,7 @@ def main():
 
         sector_df = non_shosha_df[non_shosha_df[col_map["industry"]] == industry]
         targets   = get_sector_targets(sector_df, col_map)
-        print("  target: " + str(len(targets)) + "社 (大型株優先)")
+        print("  target: " + str(len(targets)) + "社")
 
         candidates = scan_sector(targets, industry, col_map, forced=False)
         if not candidates:
@@ -467,3 +480,9 @@ def main():
 
 if __name__ == "__main__":
     main()
+```
+
+実行後ログの以下を教えてください：
+```
+size sample values: [...]
+size_code sample values: [...]
