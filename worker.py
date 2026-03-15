@@ -114,15 +114,19 @@ def fetch_jpx_prime():
 
 def get_sector_targets(sector_df, col_map):
     """
-    大型株を全件取得し、中型株で最大30社まで補完する。
-    APIコール不要で時価総額上位を確実にカバー。
+    大型株を全件取得し、中型株・小型株で30社まで補完。
+    規模区分列がない場合は先頭30社を返す。
     """
-    if "size" not in col_map:
+    if "size" not in col_map or col_map["size"] not in sector_df.columns:
+        print("  size column not found, using head 30")
         return sector_df.head(30)
 
-    large  = sector_df[sector_df[col_map["size"]] == "大型株"]
-    medium = sector_df[sector_df[col_map["size"]] == "中型株"]
-    small  = sector_df[sector_df[col_map["size"]] == "小型株"]
+    size_col = col_map["size"]
+    large  = sector_df[sector_df[size_col].astype(str).str.contains("大型")]
+    medium = sector_df[sector_df[size_col].astype(str).str.contains("中型")]
+    small  = sector_df[sector_df[size_col].astype(str).str.contains("小型")]
+
+    print("  large:" + str(len(large)) + " medium:" + str(len(medium)) + " small:" + str(len(small)))
 
     targets = large.copy()
 
@@ -133,6 +137,10 @@ def get_sector_targets(sector_df, col_map):
     remaining = 30 - len(targets)
     if remaining > 0:
         targets = pd.concat([targets, small.head(remaining)])
+
+    if len(targets) == 0:
+        print("  fallback: using head 30")
+        return sector_df.head(30)
 
     return targets
 
@@ -379,6 +387,10 @@ def main():
 
     jpx_df = df[df[col_map["market"]].astype(str).str.contains("プライム")].copy()
     print("prime rows: " + str(len(jpx_df)))
+
+    # 規模区分の実際の値をログ出力して確認
+    if "size" in col_map:
+        print("size values: " + str(jpx_df[col_map["size"]].unique().tolist()))
 
     jpx_df[col_map["code"]] = (
         jpx_df[col_map["code"]]
