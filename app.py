@@ -10,10 +10,11 @@ st.markdown("""
 NISAでの中長期的な買い付け候補を抽出するための、厳格なファンダメンタルズ分析ツールです。
 
 **【スクリーニングロジック】**
-* **基礎フィルタ**: 指定した配当利回り、および配当性向の範囲内であること
-* **成長性・財務**: 過去3年の売上および営業利益（または準ずる利益）が連続成長、自己資本比率40%以上、直近EPS成長率がマイナスでないこと
-* **配当の安定性**: 過去10年間で減配がないこと（※データ不足の場合は取得可能な期間で判定）
-* **最終抽出**: 全条件クリアを最上位とし、未達の場合は**「未達項目が少ない順（健全性優先）」**に並び替え、各業種最大3社を抽出
+* 基礎フィルタ: 指定した配当利回りを満たしているか
+* 成長性・財務: 過去3年の売上および営業利益が連続成長しているか
+* 還元姿勢: 配当性向が指定範囲内であること、過去10年間で減配がないこと
+* 業種別考慮: 自己資本比率40%以上（※銀行・リース等金融系は免除）、EPS成長率は参考値として評価
+* 最終抽出: 全条件クリアを最上位とし、未達の場合は「未達項目が少ない順」に並び替え、各業種最大3社を抽出
 """)
 
 if 'result_df' not in st.session_state:
@@ -29,7 +30,6 @@ def fetch_jpx_stock_list():
         return pd.DataFrame()
 
 def check_growth_detailed(financials_df, row_names, years=3, item_name=""):
-    """複数パターンの項目名に対応し、クラッシュを防ぐ安全な成長判定"""
     try:
         target_row = None
         for name in (row_names if isinstance(row_names, list) else [row_names]):
@@ -40,11 +40,9 @@ def check_growth_detailed(financials_df, row_names, years=3, item_name=""):
         if not target_row:
             return False, f"{item_name}データ無"
 
-        # 確実に数値化し、欠損値（NaN）は除外する
         row_data = pd.to_numeric(financials_df.loc[target_row], errors='coerce').dropna()
-        
         if len(row_data) < years:
-            return False, f"{item_name}データ不足(過去{len(row_data)}年分)"
+            return False, f"{item_name}データ不足"
         
         values = row_data.values[:years]
         dates = row_data.index[:years]
@@ -59,7 +57,7 @@ def check_growth_detailed(financials_df, row_names, years=3, item_name=""):
                 o_str = f"{older_val/1e8:.0f}億" if abs(older_val) >= 1e8 else f"{older_val:.0f}"
                 return False, f"{item_name}減({o_year}年 {o_str} → {n_year}年 {n_str})"
         return True, ""
-    except Exception as e:
+    except Exception:
         return False, f"{item_name}判定不可"
 
 def check_stable_dividends_detailed(dividends_series, target_years=10):
@@ -80,14 +78,13 @@ def check_stable_dividends_detailed(dividends_series, target_years=10):
         for i in range(actual_years - 1):
             older_val = values[i]
             newer_val = values[i+1]
-            # 浮動小数点誤差を考慮
             if newer_val < older_val - 0.01:
                 o_year = dates[i].year
                 n_year = dates[i+1].year
-                return False, actual_years, f"{n_year}年減配({older_val:.1f}円→{newer_val:.1f}円)"
+                return False, actual_years, f"{n_year}年減配"
                 
         return True, actual_years, ""
-    except Exception as e:
+    except Exception:
         return False, 0, "配当判定不可"
 
 st.sidebar.header("⚙️ 検索条件")
@@ -114,10 +111,10 @@ if st.button("🚀 ロジック実行（全自動スクリーニング）", type
         else:
             target_df = jpx_df[jpx_df['規模区分'].isin(['TOPIX Core30', 'TOPIX Large70'])]
             
-        tickers_dict = {f"{row['コード']}.T": row['33業種区分'] for _, row in target_df.iterrows()}
+        tickers_dict = {f"{row['コード']}.T": {'name': row['銘柄名'], 'industry': row['33業種区分']} for _, row in target_df.iterrows()}
         tickers = list(tickers_dict.keys())
         
-        status_text.info(f"⚡ 第1段階: {len(tickers)}銘柄の基礎データをチェック中...")
+        status_text.info(f"⚡ 第1段階: {len(tickers)}銘柄の利回りをチェック中...")
         candidate_tickers = []
         my_bar = st.progress(0)
         
@@ -126,13 +123,10 @@ if st.button("🚀 ロジック実行（全自動スクリーニング）", type
                 stock = yf.Ticker(ticker)
                 info = stock.info
                 
-                raw_yield = info.get('dividendYield', 0)
+                raw_yield = info.get('dividendYield') or info.get('trailingAnnualDividendYield', 0)
                 div_yield_pct = raw_yield if raw_yield > 1 else raw_yield * 100
                 
-                raw_payout = info.get('payoutRatio', 0)
-                payout_pct = raw_payout if raw_payout > 1 else raw_payout * 100
-                
-                if (div_yield_pct >= min_yield) and (min_payout <= payout_pct <= max_payout):
+                if div_yield_pct >= min_yield:
                     candidate_tickers.append(ticker)
             except:
                 pass
@@ -145,6 +139,9 @@ if st.button("🚀 ロジック実行（全自動スクリーニング）", type
         final_results = []
         my_bar = st.progress(0)
         
+        # 金融系セクターの定義
+        financial_sectors = ['銀行業', '証券、商品先物取引業', '保険業', 'その他金融業']
+        
         for i, ticker in enumerate(candidate_tickers):
             try:
                 stock = yf.Ticker(ticker)
@@ -152,16 +149,17 @@ if st.button("🚀 ロジック実行（全自動スクリーニング）", type
                 financials = stock.financials
                 balance_sheet = stock.balance_sheet
                 dividends = stock.dividends
+                industry = tickers_dict[ticker]['industry']
                 
-                raw_yield = info.get('dividendYield', 0)
+                raw_yield = info.get('dividendYield') or info.get('trailingAnnualDividendYield', 0)
                 div_yield_pct = round(raw_yield if raw_yield > 1 else raw_yield * 100, 2)
                 
                 raw_payout = info.get('payoutRatio', 0)
                 payout_pct = round(raw_payout if raw_payout > 1 else raw_payout * 100, 2)
                 
                 eps_growth = info.get('earningsQuarterlyGrowth', None)
+                eps_pct = round(eps_growth * 100, 1) if eps_growth is not None else None
                 
-                # 商社対策として、利益の検索範囲をEBITやNet Incomeまで広げる
                 rev_ok, rev_reason = check_growth_detailed(financials, ['Total Revenue', 'Operating Revenue', 'Revenue'], 3, "売上")
                 op_ok, op_reason = check_growth_detailed(financials, ['Operating Income', 'Operating Profit', 'EBIT', 'Net Income'], 3, "利益")
                 div_ok, div_years, div_reason = check_stable_dividends_detailed(dividends, 10)
@@ -176,29 +174,50 @@ if st.button("🚀 ロジック実行（全自動スクリーニング）", type
                         pass
                 
                 reasons = []
+                refs = [] # 参考情報の格納用
+                
+                if payout_pct < min_payout or payout_pct > max_payout:
+                    reasons.append(f"配当性向({payout_pct}%)")
                 if not rev_ok: reasons.append(rev_reason)
                 if not op_ok: reasons.append(op_reason)
-                if equity_ratio < 40.0: reasons.append(f"自己資本不足({equity_ratio}%)")
-                if eps_growth is not None and eps_growth < 0: reasons.append(f"直近EPS減({eps_growth*100:.1f}%)")
                 if not div_ok: reasons.append(div_reason)
+                
+                # 自己資本比率の判定（金融系は免除し参考値へ）
+                if equity_ratio > 0 and equity_ratio < 40.0:
+                    if industry in financial_sectors:
+                        refs.append(f"自己資本({equity_ratio}%)")
+                    else:
+                        reasons.append(f"自己資本({equity_ratio}%)")
+                elif equity_ratio == 0.0:
+                    refs.append("自己資本データ無")
+                
+                # EPSの判定（全業種で参考値へ）
+                if eps_pct is not None and eps_pct < 0:
+                    refs.append(f"EPS減({eps_pct}%)")
+                elif eps_pct is None:
+                    refs.append("EPSデータ無")
                 
                 fail_count = len(reasons)
                 passed = (fail_count == 0)
-                note = f"⭐️完全クリア(過去{div_years}年実績)" if passed else "未達: " + " / ".join(reasons)
+                
+                note = f"⭐️クリア(過去{div_years}年実績)" if passed else "未達: " + " / ".join(reasons)
+                if refs:
+                    note += f" [参考: {' , '.join(refs)}]"
                 
                 final_results.append({
                     '判定': '〇' if passed else '×',
                     '銘柄コード': ticker.replace('.T', ''),
-                    '銘柄名': info.get('shortName', ticker),
-                    '業種': tickers_dict[ticker],
+                    '銘柄名': tickers_dict[ticker]['name'],
+                    '業種': industry,
                     '配当利回り(%)': div_yield_pct,
                     '配当性向(%)': payout_pct,
                     '自己資本比率(%)': equity_ratio,
+                    'EPS成長率(%)': eps_pct if eps_pct is not None else 0.0,
                     '配当確認年数': div_years,
                     '備考 (詳細)': note,
-                    'fail_count': fail_count # ソート用の隠しスコア
+                    'fail_count': fail_count
                 })
-            except Exception as e:
+            except Exception:
                 pass
                 
             my_bar.progress((i + 1) / len(candidate_tickers))
@@ -212,16 +231,15 @@ if st.button("🚀 ロジック実行（全自動スクリーニング）", type
         
         if not final_df.empty:
             for industry, group in final_df.groupby('業種'):
-                # ★修正ポイント：未達項目が「少ない順（昇順）」、次に「利回り（降順）」でソート
                 sorted_group = group.sort_values(by=['fail_count', '配当利回り(%)'], ascending=[True, False])
                 top3 = sorted_group.head(3).copy()
                 final_picks.append(top3)
                 
             display_df = pd.concat(final_picks).reset_index(drop=True)
-            display_df = display_df.drop(columns=['fail_count']) # 表示前にスコアを隠す
+            display_df = display_df.drop(columns=['fail_count'])
             
             st.session_state['result_df'] = display_df
-            st.success(f"🎉 スクリーニング完了！健全性の高い銘柄を優先して抽出しました。")
+            st.success(f"🎉 スクリーニング完了！")
         else:
             st.warning("条件に合致する候補銘柄が見つかりませんでした。")
 
@@ -233,8 +251,8 @@ if not st.session_state['result_df'].empty:
     
     csv = df_show.to_csv(index=False).encode('utf-8-sig')
     st.download_button(
-        label="📥 結果をCSVでダウンロード（Excel文字化け対策済）",
+        label="📥 結果をCSVでダウンロード",
         data=csv,
-        file_name='dividend_stocks_detailed.csv',
+        file_name='dividend_stocks.csv',
         mime='text/csv'
     )
