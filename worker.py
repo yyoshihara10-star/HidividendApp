@@ -7,7 +7,6 @@ import os
 import sys
 from datetime import datetime, timezone, timedelta
 
-# 出力をバッファリングしない（リアルタイムでログに書き込む）
 sys.stdout.reconfigure(line_buffering=True)
 
 SOGO_SHOSHA_CODES = {8058, 8031, 8001, 8053, 8002, 8015, 2768}
@@ -152,23 +151,28 @@ def get_sector_targets(sector_df, col_map):
     return df.head(30)
 
 def check_dividend_history(ticker):
+    """
+    過去10年の配当履歴を分析。
+    戻り値: (cut_count, years_checked, is_increasing_trend, detail_str)
+    is_increasing_trend: 10年全体で配当が増加傾向かどうか
+    """
     try:
         divs = ticker.dividends
         if divs is None or len(divs) == 0:
-            return 0, 0, "配当履歴なし"
+            return 0, 0, False, "配当履歴なし"
 
         divs.index = divs.index.tz_localize(None) if divs.index.tzinfo else divs.index
         cutoff = pd.Timestamp.now() - pd.DateOffset(years=10)
         divs   = divs[divs.index >= cutoff]
 
         if len(divs) == 0:
-            return 0, 0, "配当履歴なし"
+            return 0, 0, False, "配当履歴なし"
 
         annual = divs.resample("YE").sum()
         annual = annual[annual > 0]
 
         if len(annual) < 2:
-            return 0, len(annual), "配当履歴" + str(len(annual)) + "年分"
+            return 0, len(annual), False, "配当履歴" + str(len(annual)) + "年分"
 
         years_checked = len(annual)
         cut_count     = 0
@@ -181,14 +185,27 @@ def check_dividend_history(ticker):
                 cut_count += 1
                 cut_years.append(str(annual.index[i].year))
 
+        # 増加傾向の判定: 最初の3年平均 vs 最後の3年平均で比較
+        is_increasing = False
+        if len(annual) >= 4:
+            early_avg = annual.iloc[:3].mean()
+            late_avg  = annual.iloc[-3:].mean()
+            if early_avg > 0 and late_avg > early_avg * 1.05:
+                is_increasing = True
+        elif len(annual) >= 2:
+            if annual.iloc[-1] > annual.iloc[0] * 1.05:
+                is_increasing = True
+
         detail = "配当" + str(years_checked) + "年確認"
+        if is_increasing:
+            detail += "/増加傾向"
         if cut_years:
             detail += "/減配:" + ",".join(cut_years)
 
-        return cut_count, years_checked, detail
+        return cut_count, years_checked, is_increasing, detail
 
     except Exception as e:
-        return 0, 0, "配当履歴取得失敗"
+        return 0, 0, False, "配当履歴取得失敗"
 
 def check_payout_recovery(info):
     t_eps = info.get("trailingEps")
@@ -256,10 +273,19 @@ def analyze(symbol, industry, forced=False):
         score -= 1
         reasons.append("利回り" + str(dy) + "%(低め)")
 
-    cut_count, years_checked, div_detail = check_dividend_history(ticker)
+    # 配当履歴チェック（増加傾向も取得）
+    cut_count, years_checked, is_increasing, div_detail = check_dividend_history(ticker)
+
     if cut_count >= 2:
-        print("    reason: div cut " + str(cut_count) + " times")
-        return None
+        if is_increasing:
+            # 増加傾向あり → 2回まで許容・スコア減点して継続
+            score -= 2
+            reasons.append("減配歴" + str(cut_count) + "回(" + div_detail + "/増加傾向のため継続)")
+            print("    div cut " + str(cut_count) + " but increasing trend: include with penalty")
+        else:
+            # 増加傾向なし → 除外
+            print("    reason: div cut " + str(cut_count) + " times no increasing trend")
+            return None
     elif cut_count == 1:
         score -= 1
         reasons.append("減配歴1回(" + div_detail + ")")
@@ -267,6 +293,7 @@ def analyze(symbol, industry, forced=False):
         if years_checked > 0:
             reasons.append(div_detail)
 
+    # 成長性
     rev_g = info.get("revenueGrowth")
     ear_g = info.get("earningsGrowth")
     if rev_g is not None:
@@ -280,6 +307,7 @@ def analyze(symbol, industry, forced=False):
     else:
         reasons.append("成長データ不明")
 
+    # EPS成長率
     t_eps = info.get("trailingEps")
     f_eps = info.get("forwardEps")
     if t_eps and f_eps and t_eps != 0:
@@ -291,9 +319,15 @@ def analyze(symbol, industry, forced=False):
     elif t_eps:
         reasons.append("EPS:" + str(round(t_eps, 1)) + "円(予想データなし)")
 
+    # 配当性向
     payout = info.get("payoutRatio") or 0
     if 0 < payout <= 1.0:
         payout *= 100
+    # 1%未満は取得失敗とみなす
+    if 0 < payout < 1.0:
+        payout = 0
+        reasons.append("性向データ異常")
+
     if payout > 70:
         ok, note = check_payout_recovery(info)
         if not ok:
@@ -308,6 +342,7 @@ def analyze(symbol, industry, forced=False):
     elif payout == 0:
         reasons.append("性向データなし")
 
+    # 自己資本比率
     is_finance = any(x in industry for x in ["銀行", "保険", "証券", "その他金融"])
     eq_ratio   = 0.0
     dte = info.get("debtToEquity")
