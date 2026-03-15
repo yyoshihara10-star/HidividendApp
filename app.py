@@ -144,7 +144,7 @@ else:
 st.divider()
 
 # 操作ボタン
-col1, col2, col3 = st.columns([2, 2, 2])
+col1, col2, col3, col4 = st.columns([2, 2, 2, 2])
 
 with col1:
     if st.button("スキャン開始", type="primary", disabled=(state == "running")):
@@ -168,15 +168,35 @@ with col3:
         if pid:
             stop_worker(pid)
         if scan_id:
-            conn = sqlite3.connect(DB_PATH)
-            conn.execute("DELETE FROM scan_results WHERE scan_id = ?", (scan_id,))
-            conn.execute("DELETE FROM scan_history WHERE scan_id = ?", (scan_id,))
-            conn.commit()
-            conn.close()
+            try:
+                conn = sqlite3.connect(DB_PATH)
+                conn.execute("DELETE FROM scan_results WHERE scan_id = ?", (scan_id,))
+                conn.execute("DELETE FROM scan_history WHERE scan_id = ?", (scan_id,))
+                conn.commit()
+                conn.close()
+            except:
+                pass
         clear_status()
         st.toast("停止しました")
         time.sleep(1)
         st.rerun()
+
+with col4:
+    if st.button("DBマイグレーション", type="secondary", disabled=(state == "running")):
+        try:
+            conn = sqlite3.connect(DB_PATH)
+            existing = [row[1] for row in conn.execute("PRAGMA table_info(scan_results)").fetchall()]
+            if "scan_id" not in existing:
+                conn.execute("ALTER TABLE scan_results ADD COLUMN scan_id TEXT")
+                conn.commit()
+                st.toast("マイグレーション完了（scan_id列を追加しました）")
+            else:
+                st.toast("すでにマイグレーション済みです")
+            conn.close()
+            time.sleep(1)
+            st.rerun()
+        except Exception as e:
+            st.error("失敗: " + str(e))
 
 # 実行ログ（最新）
 if os.path.exists("worker.log"):
@@ -188,7 +208,6 @@ if os.path.exists("worker.log"):
 # 結果表示
 st.divider()
 
-# 履歴セレクター（実行中でも常に表示）
 history_df = get_history()
 selected_scan_id = None
 
@@ -203,7 +222,6 @@ if not history_df.empty:
         selected_label = st.selectbox("参照する結果を選択", label_list)
         selected_scan_id = options[selected_label]
 
-        # 過去ログ参照
         with st.expander("過去の実行ログを参照", expanded=False):
             log_files = sorted(
                 [f for f in os.listdir("logs") if f.startswith("worker_") and f.endswith(".log")],
