@@ -4,7 +4,11 @@ import sqlite3
 import time
 import random
 import os
+import sys
 from datetime import datetime, timezone, timedelta
+
+# 出力をバッファリングしない（リアルタイムでログに書き込む）
+sys.stdout.reconfigure(line_buffering=True)
 
 SOGO_SHOSHA_CODES = {8058, 8031, 8001, 8053, 8002, 8015, 2768}
 MIN_YIELD  = 3.0
@@ -115,26 +119,18 @@ def fetch_jpx_prime():
     return df, col_map
 
 def get_sector_targets(sector_df, col_map):
-    """
-    規模コード（数値）でソートして上位30社を取得。
-    規模コードが小さいほど大型（1=大型、2=中型、3=小型）。
-    規模コードがない場合は規模区分テキストでソート。
-    """
     df = sector_df.copy()
 
-    # 規模コード（数値）が使える場合
     if "size_code" in col_map and col_map["size_code"] in df.columns:
         df["_sort"] = pd.to_numeric(df[col_map["size_code"]], errors="coerce").fillna(99)
         df = df.sort_values("_sort")
-        print("  sorted by size_code: " + str(df["_sort"].unique().tolist()[:5]))
+        print("  sorted by size_code")
         return df.head(30)
 
-    # 規模区分テキストが使える場合
     if "size" in col_map and col_map["size"] in df.columns:
         size_vals = df[col_map["size"]].astype(str).str.strip().unique().tolist()
         print("  size values: " + str(size_vals))
 
-        # 大型・中型・小型の順でソート用数値を付与
         def size_rank(v):
             v = str(v).strip()
             if "大型" in v or "large" in v.lower():
@@ -152,7 +148,6 @@ def get_sector_targets(sector_df, col_map):
         print("  large:" + str(large_count) + " total:" + str(len(df)))
         return df.head(30)
 
-    # どちらもない場合はそのまま先頭30社
     print("  no size info, using head 30")
     return df.head(30)
 
@@ -235,23 +230,23 @@ def fetch_info_retry(symbol):
 def analyze(symbol, industry, forced=False):
     info, ticker = fetch_info_retry(symbol)
     if info is None:
-        print("    reason: info取得失敗")
+        print("    reason: info failed")
         return None
 
     price = info.get("currentPrice") or info.get("previousClose") or 0
     if price == 0:
-        print("    reason: 株価データなし")
+        print("    reason: no price")
         return None
 
     div_rate = info.get("dividendRate") or info.get("trailingAnnualDividendRate") or 0
     dy = round(div_rate / price * 100, 2)
 
     if dy > 30:
-        print("    reason: 異常利回り=" + str(dy))
+        print("    reason: abnormal yield=" + str(dy))
         return None
 
     if not forced and dy < MIN_YIELD:
-        print("    reason: 利回り不足=" + str(dy) + "%")
+        print("    reason: low yield=" + str(dy))
         return None
 
     score   = 5
@@ -263,7 +258,7 @@ def analyze(symbol, industry, forced=False):
 
     cut_count, years_checked, div_detail = check_dividend_history(ticker)
     if cut_count >= 2:
-        print("    reason: 減配" + str(cut_count) + "回(" + div_detail + ")")
+        print("    reason: div cut " + str(cut_count) + " times")
         return None
     elif cut_count == 1:
         score -= 1
@@ -291,7 +286,7 @@ def analyze(symbol, industry, forced=False):
         eps_growth = round((f_eps - t_eps) / abs(t_eps) * 100, 1)
         prefix = "+" if eps_growth >= 0 else ""
         reasons.append(
-            "EPS:" + str(round(t_eps, 1)) + "→" + str(round(f_eps, 1)) + "円(" + prefix + str(eps_growth) + "%)"
+            "EPS:" + str(round(t_eps, 1)) + "->" + str(round(f_eps, 1)) + "円(" + prefix + str(eps_growth) + "%)"
         )
     elif t_eps:
         reasons.append("EPS:" + str(round(t_eps, 1)) + "円(予想データなし)")
@@ -302,7 +297,7 @@ def analyze(symbol, industry, forced=False):
     if payout > 70:
         ok, note = check_payout_recovery(info)
         if not ok:
-            print("    reason: 配当性向" + str(round(payout)) + "%超・回復見込みなし")
+            print("    reason: payout=" + str(round(payout)) + "% no recovery")
             return None
         score -= 1
         reasons.append("配当性向" + str(round(payout)) + "%(一時的)")
@@ -385,7 +380,7 @@ def main():
     except Exception as e:
         print("JPX fetch error: " + str(e))
         set_status("state",   "done")
-        set_status("current", "失敗:JPXデータ取得エラー")
+        set_status("current", "JPXデータ取得エラー")
         update_history(scan_id, started_at, now_jst(), 0, "error")
         return
 
@@ -393,7 +388,7 @@ def main():
     if missing:
         print("missing columns: " + str(missing))
         set_status("state",   "done")
-        set_status("current", "失敗:列が見つかりません " + str(missing))
+        set_status("current", "列が見つかりません: " + str(missing))
         update_history(scan_id, started_at, now_jst(), 0, "error")
         return
 
@@ -401,9 +396,9 @@ def main():
     print("prime rows: " + str(len(jpx_df)))
 
     if "size" in col_map:
-        print("size sample values: " + str(jpx_df[col_map["size"]].dropna().unique().tolist()[:10]))
+        print("size sample: " + str(jpx_df[col_map["size"]].dropna().unique().tolist()[:10]))
     if "size_code" in col_map:
-        print("size_code sample values: " + str(jpx_df[col_map["size_code"]].dropna().unique().tolist()[:10]))
+        print("size_code sample: " + str(jpx_df[col_map["size_code"]].dropna().unique().tolist()[:10]))
 
     jpx_df[col_map["code"]] = (
         jpx_df[col_map["code"]]
@@ -422,7 +417,7 @@ def main():
     if len(all_industries) == 0:
         print("ERROR: no industries found")
         set_status("state",   "done")
-        set_status("current", "失敗:業種データが取得できませんでした")
+        set_status("current", "業種データが取得できませんでした")
         update_history(scan_id, started_at, now_jst(), 0, "error")
         return
 
@@ -436,7 +431,7 @@ def main():
 
         sector_df = non_shosha_df[non_shosha_df[col_map["industry"]] == industry]
         targets   = get_sector_targets(sector_df, col_map)
-        print("  target: " + str(len(targets)) + "社")
+        print("  target: " + str(len(targets)) + " stocks")
 
         candidates = scan_sector(targets, industry, col_map, forced=False)
         if not candidates:
