@@ -4,7 +4,7 @@ import sqlite3
 import time
 import random
 import os
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 
 SOGO_SHOSHA_CODES = {8058, 8031, 8001, 8053, 8002, 8015, 2768}
 MIN_YIELD  = 3.0
@@ -12,6 +12,14 @@ INFO_WAIT  = 1.0
 MAX_RETRY  = 3
 SECTOR_TOP = 20
 DB_PATH    = "results.db"
+
+JST = timezone(timedelta(hours=9))
+
+def now_jst():
+    return datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S")
+
+def now_jst_id():
+    return datetime.now(JST).strftime("%Y%m%d_%H%M%S")
 
 def init_db():
     conn = sqlite3.connect(DB_PATH)
@@ -203,7 +211,6 @@ def analyze(symbol, industry, forced=False):
         score -= 1
         reasons.append("利回り" + str(dy) + "%(低め)")
 
-    # 配当履歴チェック
     cut_count, years_checked, div_detail = check_dividend_history(ticker)
     if cut_count >= 2:
         print("  exclude " + symbol + " div cut " + str(cut_count) + " times")
@@ -215,7 +222,6 @@ def analyze(symbol, industry, forced=False):
         if years_checked > 0:
             reasons.append(div_detail)
 
-    # 成長性
     rev_g = info.get("revenueGrowth")
     ear_g = info.get("earningsGrowth")
     if rev_g is not None:
@@ -229,7 +235,6 @@ def analyze(symbol, industry, forced=False):
     else:
         reasons.append("成長データ不明")
 
-    # EPS成長率
     t_eps = info.get("trailingEps")
     f_eps = info.get("forwardEps")
     if t_eps and f_eps and t_eps != 0:
@@ -239,7 +244,6 @@ def analyze(symbol, industry, forced=False):
     elif t_eps:
         reasons.append("EPS:" + str(round(t_eps, 1)))
 
-    # 配当性向
     payout = info.get("payoutRatio") or 0
     if 0 < payout <= 1.0:
         payout *= 100
@@ -257,7 +261,6 @@ def analyze(symbol, industry, forced=False):
     elif payout == 0:
         reasons.append("性向データなし")
 
-    # 自己資本比率
     is_finance = any(x in industry for x in ["銀行", "保険", "証券", "その他金融"])
     eq_ratio   = 0.0
     dte = info.get("debtToEquity")
@@ -302,8 +305,8 @@ def scan_sector(rows, industry, col_map, forced=False):
     return candidates
 
 def main():
-    started_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    scan_id    = datetime.now().strftime("%Y%m%d_%H%M%S")
+    started_at = now_jst()
+    scan_id    = now_jst_id()
 
     os.makedirs("logs", exist_ok=True)
 
@@ -328,7 +331,7 @@ def main():
         print("JPX fetch error: " + str(e))
         set_status("state",   "done")
         set_status("current", "失敗:JPXデータ取得エラー")
-        update_history(scan_id, started_at, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), 0, "error")
+        update_history(scan_id, started_at, now_jst(), 0, "error")
         return
 
     missing = [k for k in ["market", "industry", "code", "name"] if k not in col_map]
@@ -336,7 +339,7 @@ def main():
         print("missing columns: " + str(missing))
         set_status("state",   "done")
         set_status("current", "失敗:列が見つかりません " + str(missing))
-        update_history(scan_id, started_at, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), 0, "error")
+        update_history(scan_id, started_at, now_jst(), 0, "error")
         return
 
     jpx_df = df[df[col_map["market"]].astype(str).str.contains("プライム")].copy()
@@ -365,7 +368,7 @@ def main():
         print("ERROR: no industries found")
         set_status("state",   "done")
         set_status("current", "失敗:業種データが取得できませんでした")
-        update_history(scan_id, started_at, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), 0, "error")
+        update_history(scan_id, started_at, now_jst(), 0, "error")
         return
 
     total       = len(all_industries) + 1
@@ -382,7 +385,7 @@ def main():
             candidates = scan_sector(sector_df, industry, col_map, forced=True)
         if candidates:
             top5 = sorted(candidates, key=lambda x: (x["score"], x["m_cap"]), reverse=True)[:5]
-            now  = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            now  = now_jst()
             for r in top5:
                 all_results.append((
                     scan_id, now, r["industry"], r["code"], r["name"],
@@ -397,7 +400,7 @@ def main():
     if not shosha_cand:
         shosha_cand = scan_sector(shosha_df, "商社", col_map, forced=True)
     if shosha_cand:
-        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        now = now_jst()
         for r in sorted(shosha_cand, key=lambda x: (x["score"], x["m_cap"]), reverse=True):
             all_results.append((
                 scan_id, now, r["industry"], r["code"], r["name"],
@@ -406,7 +409,7 @@ def main():
             ))
 
     save_results(all_results, scan_id)
-    finished_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    finished_at = now_jst()
     set_status("state",    "done")
     set_status("progress", "100")
     set_status("finished", finished_at)
