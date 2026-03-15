@@ -36,6 +36,21 @@ def get_history():
     except:
         return pd.DataFrame()
 
+def get_past_scan_ids():
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        rows = conn.execute("""
+            SELECT DISTINCT scan_id, MIN(scanned_at) as started_at, COUNT(*) as cnt
+            FROM scan_results
+            WHERE scan_id IS NOT NULL
+            GROUP BY scan_id
+            ORDER BY started_at DESC
+        """).fetchall()
+        conn.close()
+        return rows
+    except:
+        return []
+
 def get_results(scan_id=None):
     try:
         conn = sqlite3.connect(DB_PATH)
@@ -191,46 +206,38 @@ if os.path.exists("worker.log"):
 # 結果表示
 st.divider()
 
-history_df      = get_history()
-current_scan_id = status.get("scan_id", None)
+current_scan_id  = status.get("scan_id", None)
 selected_scan_id = None
+history_df       = get_history()
+past_scan_ids    = get_past_scan_ids()
+
+# options_dictを構築（完了済みを先頭・実行中を末尾）
+options_dict = {}
 
 if not history_df.empty:
     done_history = history_df[history_df["status"] == "done"]
-    if not done_history.empty:
-        options_dict = {
-            r["scan_id"] + "  (" + r["started_at"] + "  " + str(r["result_count"]) + "銘柄)": r["scan_id"]
-            for _, r in done_history.iterrows()
-        }
-        if state == "running" and current_scan_id:
-            options_dict = {"現在のスキャン（実行中）": current_scan_id} | options_dict
+    for _, r in done_history.iterrows():
+        if r["scan_id"] != current_scan_id:
+            key = r["scan_id"] + "  (" + r["started_at"] + "  " + str(r["result_count"]) + "銘柄)"
+            options_dict[key] = r["scan_id"]
 
-        label_list       = list(options_dict.keys())
-        selected_label   = st.selectbox("参照する結果を選択", label_list)
-        selected_scan_id = options_dict[selected_label]
-    elif state == "running" and current_scan_id:
-        selected_scan_id = current_scan_id
-        st.caption("現在のスキャン結果をリアルタイム表示中")
-elif state == "running" and current_scan_id:
-    selected_scan_id = current_scan_id
-    st.caption("現在のスキャン結果をリアルタイム表示中")
+existing_ids = set(options_dict.values())
+for row in past_scan_ids:
+    sid, started_at, cnt = row[0], row[1], row[2]
+    if sid not in existing_ids and sid != current_scan_id:
+        key = sid + "  (" + str(started_at) + "  " + str(cnt) + "銘柄)"
+        options_dict[key] = sid
 
-# 実行中は30秒自動更新
+if state == "running" and current_scan_id:
+    options_dict["現在のスキャン（実行中・随時更新）"] = current_scan_id
+
+if options_dict:
+    label_list       = list(options_dict.keys())
+    selected_label   = st.selectbox("参照する結果を選択", label_list)
+    selected_scan_id = options_dict[selected_label]
+
 if state == "running":
     st.markdown('<meta http-equiv="refresh" content="30">', unsafe_allow_html=True)
-
-with st.expander("過去の実行ログを参照", expanded=False):
-    log_files = sorted(
-        [f for f in os.listdir("logs") if f.startswith("worker_") and f.endswith(".log")],
-        reverse=True
-    ) if os.path.exists("logs") else []
-    if log_files:
-        selected_log = st.selectbox("ログファイル", ["選択してください"] + log_files)
-        if selected_log != "選択してください":
-            with open(os.path.join("logs", selected_log), "r", encoding="utf-8", errors="ignore") as f:
-                st.code(f.read(), language="text")
-    else:
-        st.info("ログファイルがありません")
 
 df = get_results(selected_scan_id)
 
