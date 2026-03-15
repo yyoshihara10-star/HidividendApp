@@ -58,14 +58,6 @@ def clear_results():
     except:
         pass
 
-def start_worker():
-    subprocess.Popen(
-        [sys.executable, WORKER_PATH],
-        stdout=open("worker.log", "w"),
-        stderr=subprocess.STDOUT,
-        start_new_session=True
-    )
-
 def stop_worker(pid_str):
     try:
         pid = int(pid_str)
@@ -73,78 +65,138 @@ def stop_worker(pid_str):
             subprocess.call(["taskkill", "/F", "/PID", str(pid)])
         else:
             os.kill(pid, signal.SIGTERM)
-        return True
+        return True, None
     except Exception as e:
-        return False
+        return False, str(e)
+
+def start_worker():
+    """worker.pyを起動してエラーがあれば返す"""
+    try:
+        if not os.path.exists(WORKER_PATH):
+            return False, f"worker.py が見つかりません: {WORKER_PATH}"
+
+        log_file = open("worker.log", "w", encoding="utf-8")
+        proc = subprocess.Popen(
+            [sys.executable, WORKER_PATH],
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
+            start_new_session=True
+        )
+        return True, proc.pid
+    except Exception as e:
+        return False, str(e)
+
+# セッション状態の初期化
+if 'start_clicked' not in st.session_state:
+    st.session_state['start_clicked'] = False
+if 'start_error' not in st.session_state:
+    st.session_state['start_error'] = None
+if 'start_pid' not in st.session_state:
+    st.session_state['start_pid'] = None
 
 # ステータス取得
 status     = get_status()
 state      = status.get('state', 'not_started')
 is_running = (state == 'running')
 
-# コントロールパネル
+# ── コントロールパネル ──────────────────────────────────
 st.subheader("スキャン操作")
-col1, col2, col3, col4 = st.columns([2, 2, 2, 4])
+col1, col2, col3 = st.columns([2, 2, 2])
 
 with col1:
     if st.button(
         "スキャン開始",
         type="primary",
-        disabled=is_running,
-        help="バックグラウンドでスキャンを開始します。ブラウザを閉じても継続します。"
+        disabled=is_running or st.session_state['start_clicked'],
     ):
-        start_worker()
+        st.session_state['start_clicked'] = True
+        st.session_state['start_error']   = None
+        ok, result = start_worker()
+        if ok:
+            st.session_state['start_pid'] = result
+        else:
+            st.session_state['start_error'] = result
+            st.session_state['start_clicked'] = False
         st.rerun()
 
 with col2:
     if st.button("状態を更新"):
+        st.session_state['start_clicked'] = False
         st.rerun()
 
 with col3:
-    # 停止ボタン（実行中のみ有効）
     if st.button(
         "停止・結果削除",
         type="secondary",
         disabled=not is_running,
-        help="実行を停止し、途中の結果をすべて削除します。"
     ):
         pid = status.get('pid', '')
         if pid:
-            stopped = stop_worker(pid)
-            if stopped:
+            ok, err = stop_worker(pid)
+            if ok:
                 st.toast("プロセスを停止しました")
             else:
-                st.toast("プロセス停止に失敗しました（すでに終了している可能性があります）")
+                st.toast(f"停止失敗: {err}")
         clear_results()
+        st.session_state['start_clicked'] = False
         st.rerun()
 
-with col4:
-    if state == 'running':
-        started = status.get('started', '')
-        st.info(f"実行中（開始: {started}）")
-    elif state == 'done':
-        finished = status.get('finished', '')
-        st.success(f"完了（{finished}）")
-    else:
-        st.warning("未実行 → スキャン開始ボタンで実行できます")
+# ── 起動直後のフィードバック ────────────────────────────
+if st.session_state['start_error']:
+    st.error(f"起動失敗: {st.session_state['start_error']}")
+    st.code(f"python {WORKER_PATH}", language="bash")
+    st.caption("上記コマンドをターミナルで直接実行して、エラー内容を確認してください。")
 
-# プログレス表示（実行中のみ）
+elif st.session_state['start_clicked'] and not is_running:
+    # ボタン押下直後・DBにrunningが反映される前の数秒間
+    st.warning("起動処理中です... しばらくお待ちください")
+    with st.spinner("worker.py を起動しています..."):
+        pass
+    pid = st.session_state.get('start_pid')
+    if pid:
+        st.info(f"プロセス起動確認 PID: {pid}  （「状態を更新」ボタンで進捗を確認してください）")
+
+    # worker.logに何か出ていれば表示
+    if os.path.exists("worker.log"):
+        with open("worker.log", "r", encoding="utf-8", errors="ignore") as f:
+            content = f.read().strip()
+        if content:
+            st.code(content[:500], language="text")
+
+# ── 実行中のステータス表示 ──────────────────────────────
 if state == 'running':
+    st.session_state['start_clicked'] = False
     progress = int(status.get('progress', 0))
     current  = status.get('current', '...')
+    started  = status.get('started', '')
+    st.info(f"実行中（開始: {started}）")
     st.progress(progress / 100, text=f"{progress}%  {current}")
     st.caption("30秒ごとに自動更新されます")
     st.markdown('<meta http-equiv="refresh" content="30">', unsafe_allow_html=True)
 
-# ワーカーログ表示
-if os.path.exists("worker.log"):
-    with st.expander("実行ログ（worker.log）", expanded=False):
+elif state == 'done':
+    st.session_state['start_clicked'] = False
+    finished = status.get('finished', '')
+    st.success(f"完了（{finished}）")
+
+elif state == 'not_started' and not st.session_state['start_clicked']:
+    st.warning("未実行 → スキャン開始ボタンで実行できます")
+
+# ── 環境情報（デバッグ用） ─────────────────────────────
+with st.expander("環境情報・デバッグ", expanded=False):
+    st.write("Python:", sys.executable)
+    st.write("worker.py パス:", WORKER_PATH)
+    st.write("worker.py 存在:", os.path.exists(WORKER_PATH))
+    st.write("DB パス:", os.path.abspath(DB_PATH))
+    st.write("DB 存在:", os.path.exists(DB_PATH))
+    if os.path.exists("worker.log"):
+        st.write("--- worker.log（最新50行）---")
         with open("worker.log", "r", encoding="utf-8", errors="ignore") as f:
             lines = f.readlines()
         for line in lines[-50:]:
             st.text(line.rstrip())
 
-# 結果表示
+# ── 結果表示 ───────────────────────────────────────────
 st.divider()
 df = get_results()
 
@@ -153,7 +205,6 @@ if df.empty:
 else:
     scanned_at = df['スキャン日時'].iloc[0] if 'スキャン日時' in df.columns else ''
     display_df = df.drop(columns=['score', 'スキャン日時'], errors='ignore')
-
     st.subheader(f"スクリーニング結果  {len(display_df)} 銘柄  （取得: {scanned_at}）")
 
     industries = df['業種'].unique().tolist()
@@ -170,12 +221,10 @@ else:
                 use_container_width=True
             )
 
-    # CSVファイル名に実行時刻を含める
     try:
         dt_str = datetime.strptime(scanned_at, '%Y-%m-%d %H:%M:%S').strftime('%Y%m%d_%H%M%S')
     except:
         dt_str = datetime.now().strftime('%Y%m%d_%H%M%S')
     csv_filename = f"Hidividend_{dt_str}.csv"
-
     csv = display_df.to_csv(index=False).encode('utf-8-sig')
     st.download_button("CSVダウンロード", csv, csv_filename, "text/csv")
