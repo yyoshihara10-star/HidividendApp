@@ -3,7 +3,7 @@ import pandas as pd
 import yfinance as yf
 
 st.set_page_config(page_title="プライム高配当株・厳選ロジック版", layout="wide")
-st.title("高配当株スクリーニング (性向60%超リスク排除版)")
+st.title("高配当株スクリーニング (性向70%超除外版)")
 
 if 'result_df' not in st.session_state:
     st.session_state['result_df'] = pd.DataFrame()
@@ -32,8 +32,7 @@ def analyze_stock_strict_v2(symbol, industry):
     
     if dy < 3.0: return None
 
-    # --- 配当性向の再計算 (ピジョン等の対策) ---
-    # yfのpayoutRatioが不安定なため、EPSと配当金から直接算出を試みる
+    # --- 配当性向の再計算 ---
     eps = info.get('trailingEps') or info.get('forwardEps')
     actual_div = info.get('dividendRate') or info.get('trailingAnnualDividendRate', 0)
     
@@ -42,21 +41,21 @@ def analyze_stock_strict_v2(symbol, industry):
     else:
         payout = (info.get('payoutRatio', 0)) * 100 if info.get('payoutRatio', 0) <= 1.0 else info.get('payoutRatio', 0)
 
+    # 【今回追加の改修】配当性向70%超を完全に除外
+    if payout > 70.0: return None
+
     score = 5
     reasons = []
     
-    # --- 厳格指標チェック ---
-    # 1. 配当性向リスク (60%以上はおすすめ度を下げる)
-    if payout > 90:
-        score -= 2
-        reasons.append(f"性向過多({round(payout)}%)")
-    elif payout > 60:
+    # --- 指標チェック ---
+    # 60%以上はおすすめ度を下げる
+    if payout > 60:
         score -= 1
         reasons.append(f"性向高({round(payout)}%)")
-    elif payout < 20: # 低すぎても還元姿勢疑義で微減点
+    elif payout < 20:
         reasons.append(f"低性向({round(payout)}%)")
 
-    # 2. 売上・利益の連続成長
+    # 売上・利益の連続成長
     financials = stock.financials
     rev_keys = ['Total Revenue', 'Operating Revenue', 'Revenue']
     growth_found = False
@@ -68,7 +67,7 @@ def analyze_stock_strict_v2(symbol, industry):
             growth_found = True; break
     if not growth_found: reasons.append("データ不足")
 
-    # 3. 自己資本比率 (40%目安 / 金融・商社免除)
+    # 自己資本比率
     bs = stock.balance_sheet
     sogo_shosha_codes = [8001, 8002, 8031, 8053, 8058, 2768, 8015]
     is_shosha = int(symbol.replace('.T','')) in sogo_shosha_codes
@@ -119,7 +118,6 @@ if st.button("🚀 厳格ロジックでスキャン開始", type="primary"):
             except: continue
         
         if sector_candidates:
-            # 業界全数から時価総額順でソート
             sector_sorted = sorted(sector_candidates, key=lambda x: x['m_cap'], reverse=True)
             final_results.extend(sector_sorted[:5])
         
@@ -136,7 +134,6 @@ def highlight_rows(df):
     for industry in df['業種'].unique():
         subset = df[df['業種'] == industry]
         max_stars = subset['おすすめ度'].max()
-        # 最高評価が星4つ以上の場合のみハイライト（妥協銘柄は色をつけない）
         if max_stars.count('★') >= 4:
             target_indices = subset[subset['おすすめ度'] == max_stars].index
             for idx in target_indices:
