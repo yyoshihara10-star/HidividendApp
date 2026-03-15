@@ -113,6 +113,31 @@ def fetch_jpx_prime():
             col_map["size"] = col
     return df, col_map
 
+def get_mcap_fast(code):
+    """時価総額を軽量取得"""
+    try:
+        time.sleep(0.3)
+        fi = yf.Ticker(str(int(code)) + ".T").fast_info
+        return getattr(fi, "market_cap", 0) or 0
+    except:
+        return 0
+
+def sort_by_mcap(jpx_df, col_map):
+    """全銘柄を時価総額順にソート"""
+    print("時価総額順ソート中... (" + str(len(jpx_df)) + "銘柄)")
+    mcaps = []
+    for i, (_, row) in enumerate(jpx_df.iterrows()):
+        code = int(row[col_map["code"]])
+        mcap = get_mcap_fast(code)
+        mcaps.append(mcap)
+        if (i + 1) % 100 == 0:
+            print("  mcap取得中: " + str(i + 1) + "/" + str(len(jpx_df)))
+    jpx_df = jpx_df.copy()
+    jpx_df["_mcap"] = mcaps
+    jpx_df = jpx_df.sort_values("_mcap", ascending=False)
+    print("ソート完了")
+    return jpx_df
+
 def check_dividend_history(ticker):
     try:
         divs = ticker.dividends
@@ -294,7 +319,7 @@ def analyze(symbol, industry, forced=False):
         "score": star,
         "m_cap": m_cap,
     }
-    
+
 def scan_sector(rows, industry, col_map, forced=False):
     candidates = []
     for _, row in rows.head(SECTOR_TOP).iterrows():
@@ -365,10 +390,9 @@ def main():
     jpx_df = jpx_df.dropna(subset=[col_map["code"]])
     jpx_df[col_map["code"]] = jpx_df[col_map["code"]].astype(int)
 
-    if "size" in col_map:
-        size_order = {"大型株": 0, "中型株": 1, "小型株": 2}
-        jpx_df["_rank"] = jpx_df[col_map["size"]].map(size_order).fillna(3)
-        jpx_df = jpx_df.sort_values(["_rank", col_map["code"]])
+    # 時価総額順ソート
+    set_status("current", "時価総額順ソート中...")
+    jpx_df = sort_by_mcap(jpx_df, col_map)
 
     shosha_df      = jpx_df[jpx_df[col_map["code"]].isin(SOGO_SHOSHA_CODES)]
     non_shosha_df  = jpx_df[~jpx_df[col_map["code"]].isin(SOGO_SHOSHA_CODES)]
