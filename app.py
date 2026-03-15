@@ -142,9 +142,20 @@ def stop_worker(pid_str):
     except:
         return False
 
+def read_log(tail=None):
+    if not os.path.exists("worker.log"):
+        return ""
+    with open("worker.log", "r", encoding="utf-8", errors="ignore") as f:
+        lines = f.readlines()
+    if tail:
+        lines = lines[-tail:]
+    return "".join(lines)
+
 # セッション初期化
 if "selected_scan_id" not in st.session_state:
     st.session_state["selected_scan_id"] = None
+if "log_show_all" not in st.session_state:
+    st.session_state["log_show_all"] = False
 
 # 起動時に不整合状態を自動修正
 _status = get_status()
@@ -179,7 +190,8 @@ with col1:
     if st.button("スキャン開始", type="primary", disabled=(state == "running")):
         ok, result = start_worker()
         if ok:
-            st.session_state["selected_scan_id"] = status.get("scan_id")
+            st.session_state["selected_scan_id"] = None
+            st.session_state["log_show_all"] = False
             st.toast("スキャンを開始しました (PID: " + str(result) + ")")
             time.sleep(2)
             st.rerun()
@@ -207,10 +219,14 @@ with col3:
 
 # 実行ログ
 if os.path.exists("worker.log"):
-    with st.expander("実行ログ（最新）", expanded=(state == "running")):
-        with open("worker.log", "r", encoding="utf-8", errors="ignore") as f:
-            lines = f.readlines()
-        st.code("".join(lines[-50:]), language="text")
+    with st.expander("実行ログ", expanded=(state == "running")):
+        lcol1, lcol2 = st.columns([8, 2])
+        with lcol2:
+            if st.button("全件表示" if not st.session_state["log_show_all"] else "最新100行に戻す"):
+                st.session_state["log_show_all"] = not st.session_state["log_show_all"]
+                st.rerun()
+        log_content = read_log(tail=None if st.session_state["log_show_all"] else 100)
+        st.code(log_content, language="text")
 
 st.divider()
 
@@ -219,7 +235,6 @@ current_scan_id = status.get("scan_id", None)
 history_df      = get_history()
 past_scan_ids   = get_past_scan_ids()
 
-# 完了済みscan_idを収集
 done_ids = {}
 if not history_df.empty:
     for _, r in history_df[history_df["status"] == "done"].iterrows():
@@ -232,14 +247,14 @@ for row in past_scan_ids:
     if sid not in existing and sid != current_scan_id:
         done_ids[sid] = str(started_at) + "  " + str(cnt) + "銘柄"
 
-# 履歴選択UI（リスト形式＋ゴミ箱ボタン）
+# 履歴選択UI
 st.subheader("参照する結果を選択")
 
 if state == "running" and current_scan_id:
     c1, c2 = st.columns([10, 1])
     with c1:
-        is_current = (st.session_state["selected_scan_id"] == current_scan_id)
-        label = "▶ 現在のスキャン（実行中）" if is_current else "現在のスキャン（実行中）"
+        is_selected = (st.session_state["selected_scan_id"] == current_scan_id)
+        label = "▶ 現在のスキャン（実行中）" if is_selected else "現在のスキャン（実行中）"
         if st.button(label, key="btn_current", use_container_width=True):
             st.session_state["selected_scan_id"] = current_scan_id
             st.rerun()
@@ -260,13 +275,12 @@ for sid, info_str in done_ids.items():
             st.toast(sid + " を削除しました")
             st.rerun()
 
-# 実行中は自動更新
-if state == "running":
-    st.markdown('<meta http-equiv="refresh" content="30">', unsafe_allow_html=True)
-
 # 実行中で未選択の場合は現在のスキャンを自動選択
 if state == "running" and st.session_state["selected_scan_id"] is None and current_scan_id:
     st.session_state["selected_scan_id"] = current_scan_id
+
+if state == "running":
+    st.markdown('<meta http-equiv="refresh" content="30">', unsafe_allow_html=True)
 
 selected_scan_id = st.session_state["selected_scan_id"]
 
