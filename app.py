@@ -84,44 +84,33 @@ def stop_worker(pid_str):
     except:
         return False
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 起動時に不整合状態を自動修正
-# done なのに結果0件 → リセット
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 _status = get_status()
 _state  = _status.get("state", "not_started")
 if _state == "done" and get_results().empty:
     clear_db()
 
-# ステータス再取得（修正後）
 status = get_status()
 state  = status.get("state", "not_started")
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 状態バナー
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 if state == "running":
     progress = int(status.get("progress", 0))
     current  = status.get("current", "...")
     started  = status.get("started", "")
     st.success("### スキャン実行中")
     st.progress(progress / 100, text=str(progress) + "%  " + current)
-    st.caption("開始時刻: " + started + "  |  30秒ごとに自動更新")
-    st.markdown('<meta http-equiv="refresh" content="30">', unsafe_allow_html=True)
-
+    st.caption("開始時刻: " + started)
 elif state == "done":
     finished = status.get("finished", "")
     current  = status.get("current", "")
     st.success("### スキャン完了  " + current + "  (" + finished + ")")
-
 else:
     st.info("### 未実行  スキャン開始ボタンで実行してください")
 
 st.divider()
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 操作ボタン
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 col1, col2, col3 = st.columns([2, 2, 2])
 
 with col1:
@@ -137,6 +126,7 @@ with col1:
 
 with col2:
     if st.button("状態を更新"):
+        st.cache_data.clear()
         st.rerun()
 
 with col3:
@@ -146,20 +136,17 @@ with col3:
             stop_worker(pid)
         clear_db()
         st.toast("停止しました")
+        time.sleep(1)
         st.rerun()
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 実行ログ
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 if os.path.exists("worker.log"):
     with st.expander("実行ログ", expanded=(state == "running")):
         with open("worker.log", "r", encoding="utf-8", errors="ignore") as f:
             lines = f.readlines()
         st.code("".join(lines[-50:]), language="text")
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 結果表示
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 st.divider()
 df = get_results()
 
@@ -169,19 +156,51 @@ if df.empty:
 else:
     scanned_at = df["スキャン日時"].iloc[0] if "スキャン日時" in df.columns else ""
     display_df = df.drop(columns=["score", "スキャン日時"], errors="ignore")
+
+    # 業種ごとの最高スコアを取得
+    best_per_industry = df.groupby("業種")["score"].max().to_dict()
+
+    def highlight_best(row):
+        score_val = df.loc[
+            (df["業種"] == row["業種"]) &
+            (df["銘柄名"] == row["銘柄名"]),
+            "score"
+        ].values
+        best = best_per_industry.get(row["業種"], -1)
+        if len(score_val) > 0 and score_val[0] == best:
+            return ["background-color: #fff9c4; font-weight: bold"] * len(row)
+        return [""] * len(row)
+
     st.subheader("スクリーニング結果  " + str(len(display_df)) + " 銘柄")
+    st.caption("黄色ハイライト = 各業種トップ推奨（同率の場合は複数）")
 
     industries = df["業種"].unique().tolist()
     if "商社" in industries:
         industries = ["商社"] + [i for i in industries if i != "商社"]
 
     tabs = st.tabs(["全件"] + industries)
+
     with tabs[0]:
-        st.dataframe(display_df, use_container_width=True)
+        st.dataframe(
+            display_df.style.apply(highlight_best, axis=1),
+            use_container_width=True
+        )
+
     for tab, ind in zip(tabs[1:], industries):
         with tab:
+            ind_df = display_df[display_df["業種"] == ind].reset_index(drop=True)
+            best   = best_per_industry.get(ind, -1)
+            def highlight_ind(row, b=best, i=ind):
+                score_val = df.loc[
+                    (df["業種"] == i) &
+                    (df["銘柄名"] == row["銘柄名"]),
+                    "score"
+                ].values
+                if len(score_val) > 0 and score_val[0] == b:
+                    return ["background-color: #fff9c4; font-weight: bold"] * len(row)
+                return [""] * len(row)
             st.dataframe(
-                display_df[display_df["業種"] == ind].reset_index(drop=True),
+                ind_df.style.apply(highlight_ind, axis=1),
                 use_container_width=True
             )
 
