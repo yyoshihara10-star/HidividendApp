@@ -23,35 +23,67 @@ def get_status():
     except:
         return {}
 
-def get_results():
+def get_history():
     try:
         conn = sqlite3.connect(DB_PATH)
         df = pd.read_sql("""
-            SELECT
-                industry     AS 業種,
-                code         AS コード,
-                name         AS 銘柄名,
-                yield_pct    AS '利回り(%)',
-                payout_pct   AS '配当性向(%)',
-                equity_pct   AS '自己資本(%)',
-                mcap_oku     AS '時価総額(億)',
-                judge        AS 判定,
-                stars        AS おすすめ度,
-                note         AS 備考,
-                score,
-                scanned_at   AS スキャン日時
-            FROM scan_results
-            ORDER BY score DESC, mcap_oku DESC
+            SELECT scan_id, started_at, finished_at, result_count, status
+            FROM scan_history
+            ORDER BY started_at DESC
         """, conn)
         conn.close()
         return df
     except:
         return pd.DataFrame()
 
-def clear_db():
+def get_results(scan_id=None):
     try:
         conn = sqlite3.connect(DB_PATH)
-        conn.execute("DELETE FROM scan_results")
+        if scan_id:
+            df = pd.read_sql("""
+                SELECT
+                    industry     AS 業種,
+                    code         AS コード,
+                    name         AS 銘柄名,
+                    yield_pct    AS '利回り(%)',
+                    payout_pct   AS '配当性向(%)',
+                    equity_pct   AS '自己資本(%)',
+                    mcap_oku     AS '時価総額(億)',
+                    judge        AS 判定,
+                    stars        AS おすすめ度,
+                    note         AS 備考,
+                    score,
+                    scanned_at   AS スキャン日時
+                FROM scan_results
+                WHERE scan_id = ?
+                ORDER BY score DESC, mcap_oku DESC
+            """, conn, params=(scan_id,))
+        else:
+            df = pd.read_sql("""
+                SELECT
+                    industry     AS 業種,
+                    code         AS コード,
+                    name         AS 銘柄名,
+                    yield_pct    AS '利回り(%)',
+                    payout_pct   AS '配当性向(%)',
+                    equity_pct   AS '自己資本(%)',
+                    mcap_oku     AS '時価総額(億)',
+                    judge        AS 判定,
+                    stars        AS おすすめ度,
+                    note         AS 備考,
+                    score,
+                    scanned_at   AS スキャン日時
+                FROM scan_results
+                ORDER BY score DESC, mcap_oku DESC
+            """, conn)
+        conn.close()
+        return df
+    except:
+        return pd.DataFrame()
+
+def clear_status():
+    try:
+        conn = sqlite3.connect(DB_PATH)
         conn.execute("DELETE FROM scan_status")
         conn.commit()
         conn.close()
@@ -62,6 +94,7 @@ def start_worker():
     try:
         if not os.path.exists(WORKER_PATH):
             return False, "worker.py が見つかりません: " + WORKER_PATH
+        os.makedirs("logs", exist_ok=True)
         log = open("worker.log", "w", encoding="utf-8")
         proc = subprocess.Popen(
             [sys.executable, WORKER_PATH],
@@ -87,8 +120,8 @@ def stop_worker(pid_str):
 # 起動時に不整合状態を自動修正
 _status = get_status()
 _state  = _status.get("state", "not_started")
-if _state == "done" and get_results().empty:
-    clear_db()
+if _state == "done" and get_results(_status.get("scan_id")).empty:
+    clear_status()
 
 status = get_status()
 state  = status.get("state", "not_started")
@@ -115,7 +148,6 @@ col1, col2, col3 = st.columns([2, 2, 2])
 
 with col1:
     if st.button("スキャン開始", type="primary", disabled=(state == "running")):
-        clear_db()
         ok, result = start_worker()
         if ok:
             st.toast("スキャンを開始しました (PID: " + str(result) + ")")
@@ -131,33 +163,71 @@ with col2:
 
 with col3:
     if st.button("停止・結果削除", type="secondary", disabled=(state != "running")):
-        pid = status.get("pid", "")
+        pid     = status.get("pid", "")
+        scan_id = status.get("scan_id", "")
         if pid:
             stop_worker(pid)
-        clear_db()
+        if scan_id:
+            conn = sqlite3.connect(DB_PATH)
+            conn.execute("DELETE FROM scan_results WHERE scan_id = ?", (scan_id,))
+            conn.execute("DELETE FROM scan_history WHERE scan_id = ?", (scan_id,))
+            conn.commit()
+            conn.close()
+        clear_status()
         st.toast("停止しました")
         time.sleep(1)
         st.rerun()
 
-# 実行ログ
+# 実行ログ（最新）
 if os.path.exists("worker.log"):
-    with st.expander("実行ログ", expanded=(state == "running")):
+    with st.expander("実行ログ（最新）", expanded=(state == "running")):
         with open("worker.log", "r", encoding="utf-8", errors="ignore") as f:
             lines = f.readlines()
         st.code("".join(lines[-50:]), language="text")
 
 # 結果表示
 st.divider()
-df = get_results()
+
+# 履歴セレクター（実行中でも常に表示）
+history_df = get_history()
+selected_scan_id = None
+
+if not history_df.empty:
+    done_history = history_df[history_df["status"] == "done"]
+    if not done_history.empty:
+        options = {
+            r["scan_id"] + "  (" + r["started_at"] + "  " + str(r["result_count"]) + "銘柄)": r["scan_id"]
+            for _, r in done_history.iterrows()
+        }
+        label_list = list(options.keys())
+        selected_label = st.selectbox("参照する結果を選択", label_list)
+        selected_scan_id = options[selected_label]
+
+        # 過去ログ参照
+        with st.expander("過去の実行ログを参照", expanded=False):
+            log_files = sorted(
+                [f for f in os.listdir("logs") if f.startswith("worker_") and f.endswith(".log")],
+                reverse=True
+            ) if os.path.exists("logs") else []
+            if log_files:
+                selected_log = st.selectbox("ログファイル", ["選択してください"] + log_files)
+                if selected_log != "選択してください":
+                    with open(os.path.join("logs", selected_log), "r", encoding="utf-8", errors="ignore") as f:
+                        st.code(f.read(), language="text")
+            else:
+                st.info("ログファイルがありません")
+
+df = get_results(selected_scan_id)
 
 if df.empty:
-    if state != "running":
+    if state == "running":
+        st.info("スキャン実行中です。上のセレクターから過去の結果を参照できます。")
+    else:
         st.info("結果がありません")
 else:
     scanned_at = df["スキャン日時"].iloc[0] if "スキャン日時" in df.columns else ""
     display_df = df.drop(columns=["score", "スキャン日時"], errors="ignore")
 
-    # 業種ごとの最高スコアを取得
     best_per_industry = df.groupby("業種")["score"].max().to_dict()
 
     def highlight_best(row):
@@ -171,7 +241,8 @@ else:
             return ["background-color: #fff9c4; font-weight: bold"] * len(row)
         return [""] * len(row)
 
-    st.subheader("スクリーニング結果  " + str(len(display_df)) + " 銘柄")
+    label = "  (" + (selected_scan_id if selected_scan_id else "最新") + ")"
+    st.subheader("スクリーニング結果  " + str(len(display_df)) + " 銘柄" + label)
     st.caption("黄色ハイライト = 各業種トップ推奨（同率の場合は複数）")
 
     industries = df["業種"].unique().tolist()
