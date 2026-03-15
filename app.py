@@ -5,6 +5,8 @@ import sqlite3
 import subprocess
 import sys
 import os
+import signal
+from datetime import datetime
 
 st.set_page_config(page_title="プライム高配当株スクリーニング", layout="wide")
 st.title("高配当株スクリーニング (プライム全業種・全銘柄総当たり版)")
@@ -46,6 +48,16 @@ def get_results():
     except:
         return pd.DataFrame()
 
+def clear_results():
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.execute("DELETE FROM scan_results")
+        conn.execute("DELETE FROM scan_status")
+        conn.commit()
+        conn.close()
+    except:
+        pass
+
 def start_worker():
     subprocess.Popen(
         [sys.executable, WORKER_PATH],
@@ -54,6 +66,17 @@ def start_worker():
         start_new_session=True
     )
 
+def stop_worker(pid_str):
+    try:
+        pid = int(pid_str)
+        if sys.platform == "win32":
+            subprocess.call(["taskkill", "/F", "/PID", str(pid)])
+        else:
+            os.kill(pid, signal.SIGTERM)
+        return True
+    except Exception as e:
+        return False
+
 # ステータス取得
 status     = get_status()
 state      = status.get('state', 'not_started')
@@ -61,7 +84,7 @@ is_running = (state == 'running')
 
 # コントロールパネル
 st.subheader("スキャン操作")
-col1, col2, col3 = st.columns([2, 2, 4])
+col1, col2, col3, col4 = st.columns([2, 2, 2, 4])
 
 with col1:
     if st.button(
@@ -78,6 +101,24 @@ with col2:
         st.rerun()
 
 with col3:
+    # 停止ボタン（実行中のみ有効）
+    if st.button(
+        "停止・結果削除",
+        type="secondary",
+        disabled=not is_running,
+        help="実行を停止し、途中の結果をすべて削除します。"
+    ):
+        pid = status.get('pid', '')
+        if pid:
+            stopped = stop_worker(pid)
+            if stopped:
+                st.toast("プロセスを停止しました")
+            else:
+                st.toast("プロセス停止に失敗しました（すでに終了している可能性があります）")
+        clear_results()
+        st.rerun()
+
+with col4:
     if state == 'running':
         started = status.get('started', '')
         st.info(f"実行中（開始: {started}）")
@@ -129,5 +170,12 @@ else:
                 use_container_width=True
             )
 
+    # CSVファイル名に実行時刻を含める
+    try:
+        dt_str = datetime.strptime(scanned_at, '%Y-%m-%d %H:%M:%S').strftime('%Y%m%d_%H%M%S')
+    except:
+        dt_str = datetime.now().strftime('%Y%m%d_%H%M%S')
+    csv_filename = f"Hidividend_{dt_str}.csv"
+
     csv = display_df.to_csv(index=False).encode('utf-8-sig')
-    st.download_button("CSVダウンロード", csv, "prime_high_dividend.csv", "text/csv")
+    st.download_button("CSVダウンロード", csv, csv_filename, "text/csv")
