@@ -192,20 +192,23 @@ def fetch_info_retry(symbol):
 def analyze(symbol, industry, forced=False):
     info, ticker = fetch_info_retry(symbol)
     if info is None:
+        print("    reason: info取得失敗")
         return None
 
     price = info.get("currentPrice") or info.get("previousClose") or 0
     if price == 0:
+        print("    reason: 株価データなし")
         return None
 
     div_rate = info.get("dividendRate") or info.get("trailingAnnualDividendRate") or 0
     dy = round(div_rate / price * 100, 2)
 
     if dy > 30:
-        print("  exclude " + symbol + " abnormal yield=" + str(dy))
+        print("    reason: 異常利回り=" + str(dy))
         return None
 
     if not forced and dy < MIN_YIELD:
+        print("    reason: 利回り不足=" + str(dy) + "%")
         return None
 
     score   = 5
@@ -217,7 +220,7 @@ def analyze(symbol, industry, forced=False):
 
     cut_count, years_checked, div_detail = check_dividend_history(ticker)
     if cut_count >= 2:
-        print("  exclude " + symbol + " div cut " + str(cut_count) + " times")
+        print("    reason: 減配" + str(cut_count) + "回(" + div_detail + ")")
         return None
     elif cut_count == 1:
         score -= 1
@@ -256,7 +259,7 @@ def analyze(symbol, industry, forced=False):
     if payout > 70:
         ok, note = check_payout_recovery(info)
         if not ok:
-            print("  exclude " + symbol + " payout=" + str(round(payout)) + "%")
+            print("    reason: 配当性向" + str(round(payout)) + "%超・回復見込みなし")
             return None
         score -= 1
         reasons.append("配当性向" + str(round(payout)) + "%(一時的)")
@@ -291,7 +294,7 @@ def analyze(symbol, industry, forced=False):
         "score": star,
         "m_cap": m_cap,
     }
-
+    
 def scan_sector(rows, industry, col_map, forced=False):
     candidates = []
     for _, row in rows.head(SECTOR_TOP).iterrows():
@@ -301,13 +304,16 @@ def scan_sector(rows, industry, col_map, forced=False):
             continue
         code4  = digits[-4:].zfill(4)
         symbol = code4 + ".T"
-        print("  " + symbol)
+        name   = row[col_map["name"]]
+        print("  checking " + symbol + " " + name)
         res = analyze(symbol, industry, forced)
         if res:
             res["industry"] = industry
             res["code"]     = int(code4)
-            res["name"]     = row[col_map["name"]]
+            res["name"]     = name
             candidates.append(res)
+        else:
+            print("  -> excluded: " + symbol + " " + name)
     return candidates
 
 def main():
