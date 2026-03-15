@@ -244,9 +244,11 @@ def analyze(symbol, industry, forced=False):
     if t_eps and f_eps and t_eps != 0:
         eps_growth = round((f_eps - t_eps) / abs(t_eps) * 100, 1)
         prefix = "+" if eps_growth >= 0 else ""
-        reasons.append("EPS成長:" + prefix + str(eps_growth) + "%")
+        reasons.append(
+            "EPS:" + str(round(t_eps, 1)) + "→" + str(round(f_eps, 1)) + "円(" + prefix + str(eps_growth) + "%)"
+        )
     elif t_eps:
-        reasons.append("EPS:" + str(round(t_eps, 1)))
+        reasons.append("EPS:" + str(round(t_eps, 1)) + "円(予想データなし)")
 
     payout = info.get("payoutRatio") or 0
     if 0 < payout <= 1.0:
