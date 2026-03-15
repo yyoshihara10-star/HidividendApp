@@ -14,11 +14,11 @@ if 'debug_log' not in st.session_state:
 
 SOGO_SHOSHA_CODES = {8058, 8031, 8001, 8053, 8002, 8015, 2768}
 
-# ── レート制限対策の設定 ─────────────────────────
-REQUEST_INTERVAL  = 0.8   # リクエスト間の待機秒数
-MAX_RETRY         = 3     # 429時の最大リトライ回数
-SECTOR_MAX_STOCKS = 30    # 業種内で時価総額上位何社まで取得するか
-# ────────────────────────────────────────────────
+# ── レート制限対策 ──────────────────────────────────
+REQUEST_INTERVAL = 1.0   # リクエスト間の基本待機（秒）
+MAX_RETRY        = 3     # 429時の最大リトライ回数
+SECTOR_TOP_N     = 20    # 業種内上位何社をスクリーニングするか（API呼び出しなし絞り込み）
+# ────────────────────────────────────────────────────
 
 @st.cache_data(ttl=86400)
 def fetch_jpx_prime():
@@ -26,7 +26,7 @@ def fetch_jpx_prime():
     try:
         df = pd.read_excel(url, header=0)
         return df
-    except Exception as e:
+    except:
         return pd.DataFrame()
 
 def detect_columns(df):
@@ -41,52 +41,62 @@ def detect_columns(df):
             col_map['code'] = col
         elif '銘柄' in c or '名称' in c:
             col_map['name'] = col
+        elif '規模' in c or 'サイズ' in c:
+            col_map['size'] = col   # 規模区分（大型・中型・小型）があれば使う
     return col_map
-
-def fetch_info_with_retry(symbol):
-    """429エラー時に指数バックオフでリトライ"""
-    for attempt in range(MAX_RETRY):
-        try:
-            time.sleep(REQUEST_INTERVAL + random.uniform(0, 0.3))  # ランダム揺らぎを追加
-            stock = yf.Ticker(symbol)
-            info  = stock.info
-            if not info or len(info) < 5:
-                return None, None, None, f"{symbol}: infoデータ空"
-            return stock, info, None, None
-        except Exception as e:
-            err_str = str(e)
-            if 'Too Many Requests' in err_str or '429' in err_str:
-                wait = (2 ** attempt) * 5 + random.uniform(0, 2)  # 5秒→10秒→20秒
-                if attempt < MAX_RETRY - 1:
-                    time.sleep(wait)
-                    continue
-                return None, None, None, f"{symbol}: レート制限（{MAX_RETRY}回リトライ失敗）"
-            return None, None, None, f"{symbol}: 例外 {err_str[:60]}"
-    return None, None, None, f"{symbol}: リトライ上限超過"
 
 def check_payout_recovery(info):
     trailing_eps = info.get('trailingEps')
     forward_eps  = info.get('forwardEps')
     if (trailing_eps is not None and forward_eps is not None
             and trailing_eps != 0 and forward_eps > trailing_eps):
-        improvement = round((forward_eps - trailing_eps) / abs(trailing_eps) * 100, 1)
-        return True, f"業績回復見込み(予EPS+{improvement}%)"
+        pct = round((forward_eps - trailing_eps) / abs(trailing_eps) * 100, 1)
+        return True, f"業績回復見込み(予EPS+{pct}%)"
     rec = (info.get('recommendationKey') or '').lower()
     if rec in ('buy', 'strong_buy'):
         return True, "業績回復見込み(アナリスト買い推奨)"
     return False, ""
 
+def fetch_with_retry(symbol):
+    """1社分のデータ取得。429時は指数バックオフでリトライ。"""
+    for attempt in range(MAX_RETRY):
+        try:
+            # リクエスト前に必ず待機
+            wait = REQUEST_INTERVAL + random.uniform(0.1, 0.5)
+            time.sleep(wait)
+
+            ticker = yf.Ticker(symbol)
+            info   = ticker.info
+
+            if not info or len(info) < 5:
+                return None, None, f"{symbol}: データ空"
+
+            return ticker, info, None
+
+        except Exception as e:
+            msg = str(e)
+            if 'Too Many Requests' in msg or '429' in msg:
+                if attempt < MAX_RETRY - 1:
+                    backoff = (2 ** attempt) * 8   # 8秒 → 16秒 → 32秒
+                    time.sleep(backoff)
+                else:
+                    return None, None, f"{symbol}: レート制限（リトライ{MAX_RETRY}回失敗）"
+            else:
+                return None, None, f"{symbol}: 例外 {msg[:60]}"
+
+    return None, None, f"{symbol}: リトライ上限超過"
+
 def analyze_stock(symbol, industry, forced=False):
-    stock, info, _, err = fetch_info_with_retry(symbol)
+    ticker, info, err = fetch_with_retry(symbol)
     if info is None:
         return None, err
 
     price    = info.get('currentPrice') or info.get('previousClose') or 0
     if price == 0:
-        return None, f"{symbol}: 株価データなし"
+        return None, f"{symbol}: 株価なし"
 
     div_rate = info.get('dividendRate') or info.get('trailingAnnualDividendRate') or 0
-    dy = round((div_rate / price * 100), 2)
+    dy = round(div_rate / price * 100, 2)
 
     if not forced and dy < 3.0:
         return None, f"{symbol}: 利回り{dy}%（3%未満）"
@@ -98,35 +108,35 @@ def analyze_stock(symbol, industry, forced=False):
         score -= 1
         reasons.append(f"利回り{dy}%（低め）")
 
-    # 売上/利益トレンド（financialsはinfoと別リクエストなので取得済みstockを使う）
+    # 売上/利益トレンド
     try:
-        financials = stock.financials
-        rev_keys   = ['Total Revenue', 'Operating Revenue', 'Revenue', 'Operating Income']
-        growth_found = False
+        fins     = ticker.financials
+        rev_keys = ['Total Revenue', 'Operating Revenue', 'Revenue', 'Operating Income']
+        found    = False
         for k in rev_keys:
-            if k in financials.index:
-                vals = pd.to_numeric(financials.loc[k], errors='coerce').dropna().values[:3]
+            if k in fins.index:
+                vals = pd.to_numeric(fins.loc[k], errors='coerce').dropna().values[:3]
                 if len(vals) >= 2 and vals[0] < vals[1]:
                     score -= 1
                     reasons.append("売上/利益減")
-                growth_found = True
+                found = True
                 break
-        if not growth_found:
+        if not found:
             reasons.append("成長データ不明")
     except:
         reasons.append("成長データ取得失敗")
 
     # 配当性向
-    payout = info.get('payoutRatio', 0) or 0
+    payout = info.get('payoutRatio') or 0
     if 0 < payout <= 1.0:
         payout *= 100
     if payout > 70:
-        is_recovery, recovery_note = check_payout_recovery(info)
-        if not is_recovery:
+        ok, note = check_payout_recovery(info)
+        if not ok:
             return None, f"{symbol}: 配当性向{round(payout)}%超・回復見込みなし→除外"
         score -= 1
         reasons.append(f"配当性向{round(payout)}%（一時的）")
-        reasons.append(recovery_note)
+        reasons.append(note)
     elif 0 < payout < 30:
         score -= 1
         reasons.append(f"配当性向{round(payout)}%（低）")
@@ -137,7 +147,7 @@ def analyze_stock(symbol, industry, forced=False):
     eq_ratio   = 0.0
     is_finance = any(x in industry for x in ['銀行', '保険', '証券', 'その他金融'])
     try:
-        bs = stock.balance_sheet
+        bs = ticker.balance_sheet
         if 'Stockholders Equity' in bs.index and 'Total Assets' in bs.index:
             eq_ratio = round(
                 bs.loc['Stockholders Equity'].iloc[0] /
@@ -149,16 +159,15 @@ def analyze_stock(symbol, industry, forced=False):
     except:
         pass
 
-    m_cap     = info.get('marketCap', 0) or 0
+    m_cap     = info.get('marketCap') or 0
     star      = max(1, score)
     judge     = "〇" if star >= 4 else ("△" if star >= 2 else "×")
-    m_cap_oku = round(m_cap / 1_000_000_00) if m_cap else 0
 
     return {
         '利回り(%)':    dy,
         '配当性向(%)':  round(payout, 1),
         '自己資本(%)':  eq_ratio,
-        '時価総額(億)': m_cap_oku,
+        '時価総額(億)': round(m_cap / 1_0000_0000) if m_cap else 0,
         '判定':         judge,
         'おすすめ度':   "★" * star + "☆" * (5 - star),
         '備考':         " / ".join(reasons) if reasons else "良好（指標クリア）",
@@ -166,29 +175,29 @@ def analyze_stock(symbol, industry, forced=False):
         'm_cap':        m_cap,
     }, None
 
-def get_market_cap_quick(symbol):
-    """時価総額だけを素早く取得（上位銘柄の事前絞り込み用）"""
-    try:
-        time.sleep(0.3)
-        info = yf.Ticker(symbol).fast_info
-        return getattr(info, 'market_cap', 0) or 0
-    except:
-        return 0
+def sort_rows_by_jpx_priority(rows_df, col_map):
+    """
+    APIを使わずJPXデータだけで優先順位をつける。
+    規模区分（大型>中型>小型）→ コード番号昇順（古い=歴史ある会社）
+    """
+    df = rows_df.copy()
+    if 'size' in col_map and col_map['size'] in df.columns:
+        size_order = {'大型株': 0, '中型株': 1, '小型株': 2}
+        df['_size_rank'] = df[col_map['size']].map(size_order).fillna(3)
+        df = df.sort_values(['_size_rank', col_map['code']])
+    else:
+        # 規模列がなければコード昇順（古い大企業が小さい番号を持つ傾向）
+        df = df.sort_values(col_map['code'])
+    return df
 
-def get_top_stocks_by_mcap(rows, col_map, top_n=SECTOR_MAX_STOCKS):
-    """業種内を時価総額上位top_nに絞り込む（全銘柄を詳細取得しないための前処理）"""
-    mcaps = []
-    for _, row in rows.iterrows():
-        code  = f"{int(row[col_map['code']])}.T"
-        mcap  = get_market_cap_quick(code)
-        mcaps.append((row, mcap))
-    mcaps.sort(key=lambda x: x[1], reverse=True)
-    return [r for r, _ in mcaps[:top_n]]
-
-def scan_industry(rows, industry, col_map, forced=False):
+def scan_rows(rows_df, industry, col_map, top_n, forced=False):
+    """上位top_n社だけAPIを叩いてスクリーニング"""
+    sorted_df  = sort_rows_by_jpx_priority(rows_df, col_map)
+    target_df  = sorted_df.head(top_n)
     candidates = []
     skip_log   = []
-    for row in rows:
+
+    for _, row in target_df.iterrows():
         code = f"{int(row[col_map['code']])}.T"
         name = row[col_map['name']]
         res, reason = analyze_stock(code, industry, forced=forced)
@@ -197,20 +206,21 @@ def scan_industry(rows, industry, col_map, forced=False):
             candidates.append(res)
         elif reason:
             skip_log.append(reason)
+
     return candidates, skip_log
 
 # ─── メインUI ────────────────────────────────────────
 if st.button("🚀 プライム全銘柄・徹底スキャン", type="primary"):
-    st.session_state['debug_log']  = []
-    st.session_state['result_df']  = pd.DataFrame()
-    raw_df = fetch_jpx_prime()
+    st.session_state['debug_log'] = []
+    st.session_state['result_df'] = pd.DataFrame()
 
+    raw_df = fetch_jpx_prime()
     if raw_df.empty:
-        st.error("JPXデータが取得できませんでした。")
+        st.error("JPXデータ取得失敗")
         st.stop()
 
     col_map = detect_columns(raw_df)
-    missing = [k for k in ['market','industry','code','name'] if k not in col_map]
+    missing = [k for k in ['market', 'industry', 'code', 'name'] if k not in col_map]
     with st.expander("🔍 JPXデータ確認", expanded=bool(missing)):
         st.write("列マッピング:", col_map)
         st.dataframe(raw_df.head(3))
@@ -223,8 +233,8 @@ if st.button("🚀 プライム全銘柄・徹底スキャン", type="primary"):
     jpx_df = jpx_df.dropna(subset=[col_map['code']])
     st.info(f"プライム銘柄数: {len(jpx_df)} 件")
 
-    shosha_rows   = jpx_df[jpx_df[col_map['code']].isin(SOGO_SHOSHA_CODES)].copy()
-    non_shosha_df = jpx_df[~jpx_df[col_map['code']].isin(SOGO_SHOSHA_CODES)].copy()
+    shosha_rows   = jpx_df[jpx_df[col_map['code']].isin(SOGO_SHOSHA_CODES)]
+    non_shosha_df = jpx_df[~jpx_df[col_map['code']].isin(SOGO_SHOSHA_CODES)]
     all_industries = sorted(non_shosha_df[col_map['industry']].dropna().unique())
 
     final_results = []
@@ -234,20 +244,17 @@ if st.button("🚀 プライム全銘柄・徹底スキャン", type="primary"):
     total_steps   = len(all_industries) + 1
 
     for idx, industry in enumerate(all_industries):
-        status_text.text(f"[{idx+1}/{len(all_industries)}] 時価総額上位絞り込み中: {industry}")
-        sector_rows_df = non_shosha_df[non_shosha_df[col_map['industry']] == industry]
+        sector_df = non_shosha_df[non_shosha_df[col_map['industry']] == industry]
+        n = min(SECTOR_TOP_N, len(sector_df))
+        status_text.text(f"[{idx+1}/{len(all_industries)}] {industry}（上位{n}社をスキャン中...）")
 
-        # ── ① 時価総額上位30社に絞り込んでからスキャン ──
-        top_rows = get_top_stocks_by_mcap(sector_rows_df, col_map, top_n=SECTOR_MAX_STOCKS)
-
-        status_text.text(f"[{idx+1}/{len(all_industries)}] スクリーニング中: {industry}（上位{len(top_rows)}社）")
-        candidates, skips = scan_industry(top_rows, industry, col_map, forced=False)
+        candidates, skips = scan_rows(sector_df, industry, col_map, top_n=SECTOR_TOP_N, forced=False)
         all_skip_log.extend(skips)
 
         # 1件も取れなければ強制選出
         if not candidates:
-            status_text.text(f"[{idx+1}/{len(all_industries)}] 強制選出中: {industry}")
-            candidates, skips2 = scan_industry(top_rows, industry, col_map, forced=True)
+            status_text.text(f"[{idx+1}/{len(all_industries)}] {industry}（強制選出中...）")
+            candidates, skips2 = scan_rows(sector_df, industry, col_map, top_n=SECTOR_TOP_N, forced=True)
             all_skip_log.extend(skips2)
 
         if candidates:
@@ -259,12 +266,11 @@ if st.button("🚀 プライム全銘柄・徹底スキャン", type="primary"):
         progress_bar.progress((idx + 1) / total_steps)
 
     # 商社スキャン
-    status_text.text("スキャン中: 商社（総合商社7社）")
-    shosha_top  = get_top_stocks_by_mcap(shosha_rows, col_map, top_n=10)
-    shosha_cand, skips = scan_industry(shosha_top, "商社", col_map, forced=False)
+    status_text.text(f"商社（総合商社{len(shosha_rows)}社をスキャン中...）")
+    shosha_cand, skips = scan_rows(shosha_rows, "商社", col_map, top_n=10, forced=False)
     all_skip_log.extend(skips)
     if not shosha_cand:
-        shosha_cand, skips2 = scan_industry(shosha_top, "商社", col_map, forced=True)
+        shosha_cand, skips2 = scan_rows(shosha_rows, "商社", col_map, top_n=10, forced=True)
         all_skip_log.extend(skips2)
     if shosha_cand:
         final_results.extend(sorted(shosha_cand, key=lambda x: (x['score'], x['m_cap']), reverse=True))
@@ -274,8 +280,8 @@ if st.button("🚀 プライム全銘柄・徹底スキャン", type="primary"):
     st.session_state['debug_log'] = all_skip_log
 
     if final_results:
-        cols = ['業種','コード','銘柄名','利回り(%)','配当性向(%)',
-                '自己資本(%)','時価総額(億)','判定','おすすめ度','備考']
+        cols = ['業種', 'コード', '銘柄名', '利回り(%)', '配当性向(%)',
+                '自己資本(%)', '時価総額(億)', '判定', 'おすすめ度', '備考']
         st.session_state['result_df'] = pd.DataFrame(final_results)[cols]
         st.success(f"✅ {len(final_results)} 銘柄を検出")
     else:
@@ -293,7 +299,8 @@ if not st.session_state['result_df'].empty:
         st.dataframe(df_show, use_container_width=True)
     for tab, ind in zip(tabs[1:], industries):
         with tab:
-            st.dataframe(df_show[df_show['業種'] == ind].reset_index(drop=True), use_container_width=True)
+            st.dataframe(df_show[df_show['業種'] == ind].reset_index(drop=True),
+                         use_container_width=True)
 
     csv = df_show.to_csv(index=False).encode('utf-8-sig')
     st.download_button("📥 CSVダウンロード", csv, "prime_high_dividend.csv", "text/csv")
