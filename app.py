@@ -1,4 +1,3 @@
-# app.py
 import streamlit as st
 import pandas as pd
 import sqlite3
@@ -48,7 +47,7 @@ def get_results():
     except:
         return pd.DataFrame()
 
-def clear_results():
+def clear_db():
     try:
         conn = sqlite3.connect(DB_PATH)
         conn.execute("DELETE FROM scan_results")
@@ -58,27 +57,14 @@ def clear_results():
     except:
         pass
 
-def stop_worker(pid_str):
-    try:
-        pid = int(pid_str)
-        if sys.platform == "win32":
-            subprocess.call(["taskkill", "/F", "/PID", str(pid)])
-        else:
-            os.kill(pid, signal.SIGTERM)
-        return True, None
-    except Exception as e:
-        return False, str(e)
-
 def start_worker():
-    """worker.pyを起動してエラーがあれば返す"""
     try:
         if not os.path.exists(WORKER_PATH):
-            return False, f"worker.py が見つかりません: {WORKER_PATH}"
-
-        log_file = open("worker.log", "w", encoding="utf-8")
+            return False, "worker.py が見つかりません: " + WORKER_PATH
+        log = open("worker.log", "w", encoding="utf-8")
         proc = subprocess.Popen(
             [sys.executable, WORKER_PATH],
-            stdout=log_file,
+            stdout=log,
             stderr=subprocess.STDOUT,
             start_new_session=True
         )
@@ -86,128 +72,98 @@ def start_worker():
     except Exception as e:
         return False, str(e)
 
-# セッション状態の初期化
-if 'start_clicked' not in st.session_state:
-    st.session_state['start_clicked'] = False
-if 'start_error' not in st.session_state:
-    st.session_state['start_error'] = None
-if 'start_pid' not in st.session_state:
-    st.session_state['start_pid'] = None
+def stop_worker(pid_str):
+    try:
+        pid = int(pid_str)
+        if sys.platform == "win32":
+            subprocess.call(["taskkill", "/F", "/PID", str(pid)])
+        else:
+            os.kill(pid, signal.SIGTERM)
+        return True
+    except:
+        return False
 
 # ステータス取得
-status     = get_status()
-state      = status.get('state', 'not_started')
-is_running = (state == 'running')
+status = get_status()
+state  = status.get("state", "not_started")
 
-# ── コントロールパネル ──────────────────────────────────
-st.subheader("スキャン操作")
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 状態バナー（最上部に大きく表示）
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+if state == "running":
+    progress = int(status.get("progress", 0))
+    current  = status.get("current", "...")
+    started  = status.get("started", "")
+    st.success("### スキャン実行中")
+    st.progress(progress / 100, text=str(progress) + "%  " + current)
+    st.caption("開始時刻: " + started + "  |  30秒ごとに自動更新")
+    st.markdown('<meta http-equiv="refresh" content="30">', unsafe_allow_html=True)
+
+elif state == "done":
+    finished = status.get("finished", "")
+    current  = status.get("current", "")
+    st.success("### スキャン完了  " + current + "  (" + finished + ")")
+
+else:
+    st.info("### 未実行  スキャン開始ボタンで実行してください")
+
+st.divider()
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 操作ボタン
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 col1, col2, col3 = st.columns([2, 2, 2])
 
 with col1:
-    if st.button(
-        "スキャン開始",
-        type="primary",
-        disabled=is_running or st.session_state['start_clicked'],
-    ):
-        st.session_state['start_clicked'] = True
-        st.session_state['start_error']   = None
+    start_disabled = (state == "running")
+    if st.button("スキャン開始", type="primary", disabled=start_disabled):
+        clear_db()
         ok, result = start_worker()
         if ok:
-            st.session_state['start_pid'] = result
+            st.toast("スキャンを開始しました (PID: " + str(result) + ")")
+            time_mod = __import__("time")
+            time_mod.sleep(2)
+            st.rerun()
         else:
-            st.session_state['start_error'] = result
-            st.session_state['start_clicked'] = False
-        st.rerun()
+            st.error("起動失敗: " + str(result))
 
 with col2:
     if st.button("状態を更新"):
-        st.session_state['start_clicked'] = False
         st.rerun()
 
 with col3:
-    if st.button(
-        "停止・結果削除",
-        type="secondary",
-        disabled=not is_running,
-    ):
-        pid = status.get('pid', '')
+    stop_disabled = (state != "running")
+    if st.button("停止・結果削除", type="secondary", disabled=stop_disabled):
+        pid = status.get("pid", "")
         if pid:
-            ok, err = stop_worker(pid)
-            if ok:
-                st.toast("プロセスを停止しました")
-            else:
-                st.toast(f"停止失敗: {err}")
-        clear_results()
-        st.session_state['start_clicked'] = False
+            stop_worker(pid)
+        clear_db()
+        st.toast("停止しました")
         st.rerun()
 
-# ── 起動直後のフィードバック ────────────────────────────
-if st.session_state['start_error']:
-    st.error(f"起動失敗: {st.session_state['start_error']}")
-    st.code(f"python {WORKER_PATH}", language="bash")
-    st.caption("上記コマンドをターミナルで直接実行して、エラー内容を確認してください。")
-
-elif st.session_state['start_clicked'] and not is_running:
-    # ボタン押下直後・DBにrunningが反映される前の数秒間
-    st.warning("起動処理中です... しばらくお待ちください")
-    with st.spinner("worker.py を起動しています..."):
-        pass
-    pid = st.session_state.get('start_pid')
-    if pid:
-        st.info(f"プロセス起動確認 PID: {pid}  （「状態を更新」ボタンで進捗を確認してください）")
-
-    # worker.logに何か出ていれば表示
-    if os.path.exists("worker.log"):
-        with open("worker.log", "r", encoding="utf-8", errors="ignore") as f:
-            content = f.read().strip()
-        if content:
-            st.code(content[:500], language="text")
-
-# ── 実行中のステータス表示 ──────────────────────────────
-if state == 'running':
-    st.session_state['start_clicked'] = False
-    progress = int(status.get('progress', 0))
-    current  = status.get('current', '...')
-    started  = status.get('started', '')
-    st.info(f"実行中（開始: {started}）")
-    st.progress(progress / 100, text=f"{progress}%  {current}")
-    st.caption("30秒ごとに自動更新されます")
-    st.markdown('<meta http-equiv="refresh" content="30">', unsafe_allow_html=True)
-
-elif state == 'done':
-    st.session_state['start_clicked'] = False
-    finished = status.get('finished', '')
-    st.success(f"完了（{finished}）")
-
-elif state == 'not_started' and not st.session_state['start_clicked']:
-    st.warning("未実行 → スキャン開始ボタンで実行できます")
-
-# ── 環境情報（デバッグ用） ─────────────────────────────
-with st.expander("環境情報・デバッグ", expanded=False):
-    st.write("Python:", sys.executable)
-    st.write("worker.py パス:", WORKER_PATH)
-    st.write("worker.py 存在:", os.path.exists(WORKER_PATH))
-    st.write("DB パス:", os.path.abspath(DB_PATH))
-    st.write("DB 存在:", os.path.exists(DB_PATH))
-    if os.path.exists("worker.log"):
-        st.write("--- worker.log（最新50行）---")
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 実行ログ
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+if os.path.exists("worker.log"):
+    with st.expander("実行ログ", expanded=(state == "running")):
         with open("worker.log", "r", encoding="utf-8", errors="ignore") as f:
             lines = f.readlines()
-        for line in lines[-50:]:
-            st.text(line.rstrip())
+        st.code("".join(lines[-50:]), language="text")
 
-# ── 結果表示 ───────────────────────────────────────────
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 結果表示
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 st.divider()
 df = get_results()
 
 if df.empty:
-    st.info("結果がありません。スキャンを実行してください。")
+    st.info("結果がありません")
 else:
-    scanned_at = df['スキャン日時'].iloc[0] if 'スキャン日時' in df.columns else ''
-    display_df = df.drop(columns=['score', 'スキャン日時'], errors='ignore')
-    st.subheader(f"スクリーニング結果  {len(display_df)} 銘柄  （取得: {scanned_at}）")
+    scanned_at = df["スキャン日時"].iloc[0] if "スキャン日時" in df.columns else ""
+    display_df = df.drop(columns=["score", "スキャン日時"], errors="ignore")
+    st.subheader("スクリーニング結果  " + str(len(display_df)) + " 銘柄")
 
-    industries = df['業種'].unique().tolist()
+    industries = df["業種"].unique().tolist()
     if "商社" in industries:
         industries = ["商社"] + [i for i in industries if i != "商社"]
 
@@ -217,14 +173,19 @@ else:
     for tab, ind in zip(tabs[1:], industries):
         with tab:
             st.dataframe(
-                display_df[display_df['業種'] == ind].reset_index(drop=True),
+                display_df[display_df["業種"] == ind].reset_index(drop=True),
                 use_container_width=True
             )
 
     try:
-        dt_str = datetime.strptime(scanned_at, '%Y-%m-%d %H:%M:%S').strftime('%Y%m%d_%H%M%S')
+        dt_str = datetime.strptime(scanned_at, "%Y-%m-%d %H:%M:%S").strftime("%Y%m%d_%H%M%S")
     except:
-        dt_str = datetime.now().strftime('%Y%m%d_%H%M%S')
-    csv_filename = f"Hidividend_{dt_str}.csv"
-    csv = display_df.to_csv(index=False).encode('utf-8-sig')
-    st.download_button("CSVダウンロード", csv, csv_filename, "text/csv")
+        dt_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    csv = display_df.to_csv(index=False).encode("utf-8-sig")
+    st.download_button(
+        "CSVダウンロード",
+        csv,
+        "Hidividend_" + dt_str + ".csv",
+        "text/csv"
+    )
