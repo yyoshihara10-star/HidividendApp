@@ -10,7 +10,6 @@ SOGO_SHOSHA_CODES = {8058, 8031, 8001, 8053, 8002, 8015, 2768}
 MIN_YIELD  = 3.0
 INFO_WAIT  = 1.0
 MAX_RETRY  = 3
-SECTOR_TOP = 20
 DB_PATH    = "results.db"
 
 JST = timezone(timedelta(hours=9))
@@ -113,30 +112,29 @@ def fetch_jpx_prime():
             col_map["size"] = col
     return df, col_map
 
-def get_mcap_fast(code):
-    """時価総額を軽量取得"""
-    try:
-        time.sleep(0.3)
-        fi = yf.Ticker(str(int(code)) + ".T").fast_info
-        return getattr(fi, "market_cap", 0) or 0
-    except:
-        return 0
+def get_sector_targets(sector_df, col_map):
+    """
+    大型株を全件取得し、中型株で最大30社まで補完する。
+    APIコール不要で時価総額上位を確実にカバー。
+    """
+    if "size" not in col_map:
+        return sector_df.head(30)
 
-def sort_by_mcap(jpx_df, col_map):
-    """全銘柄を時価総額順にソート"""
-    print("時価総額順ソート中... (" + str(len(jpx_df)) + "銘柄)")
-    mcaps = []
-    for i, (_, row) in enumerate(jpx_df.iterrows()):
-        code = int(row[col_map["code"]])
-        mcap = get_mcap_fast(code)
-        mcaps.append(mcap)
-        if (i + 1) % 100 == 0:
-            print("  mcap取得中: " + str(i + 1) + "/" + str(len(jpx_df)))
-    jpx_df = jpx_df.copy()
-    jpx_df["_mcap"] = mcaps
-    jpx_df = jpx_df.sort_values("_mcap", ascending=False)
-    print("ソート完了")
-    return jpx_df
+    large  = sector_df[sector_df[col_map["size"]] == "大型株"]
+    medium = sector_df[sector_df[col_map["size"]] == "中型株"]
+    small  = sector_df[sector_df[col_map["size"]] == "小型株"]
+
+    targets = large.copy()
+
+    remaining = 30 - len(targets)
+    if remaining > 0:
+        targets = pd.concat([targets, medium.head(remaining)])
+
+    remaining = 30 - len(targets)
+    if remaining > 0:
+        targets = pd.concat([targets, small.head(remaining)])
+
+    return targets
 
 def check_dividend_history(ticker):
     try:
@@ -322,7 +320,7 @@ def analyze(symbol, industry, forced=False):
 
 def scan_sector(rows, industry, col_map, forced=False):
     candidates = []
-    for _, row in rows.head(SECTOR_TOP).iterrows():
+    for _, row in rows.iterrows():
         raw    = str(row[col_map["code"]]).strip()
         digits = "".join(filter(str.isdigit, raw))
         if len(digits) < 4:
@@ -390,10 +388,6 @@ def main():
     jpx_df = jpx_df.dropna(subset=[col_map["code"]])
     jpx_df[col_map["code"]] = jpx_df[col_map["code"]].astype(int)
 
-    # 時価総額順ソート
-    set_status("current", "時価総額順ソート中...")
-    jpx_df = sort_by_mcap(jpx_df, col_map)
-
     shosha_df      = jpx_df[jpx_df[col_map["code"]].isin(SOGO_SHOSHA_CODES)]
     non_shosha_df  = jpx_df[~jpx_df[col_map["code"]].isin(SOGO_SHOSHA_CODES)]
     all_industries = sorted(non_shosha_df[col_map["industry"]].dropna().unique())
@@ -414,11 +408,16 @@ def main():
         print("[" + str(idx+1) + "/" + str(total) + "] " + industry)
         set_status("current",  "[" + str(idx+1) + "/" + str(total) + "] " + industry)
         set_status("progress", str(round((idx / total) * 100)))
-        sector_df  = non_shosha_df[non_shosha_df[col_map["industry"]] == industry]
-        candidates = scan_sector(sector_df, industry, col_map, forced=False)
+
+        sector_df = non_shosha_df[non_shosha_df[col_map["industry"]] == industry]
+        targets   = get_sector_targets(sector_df, col_map)
+        print("  target: " + str(len(targets)) + "社 (大型株優先)")
+
+        candidates = scan_sector(targets, industry, col_map, forced=False)
         if not candidates:
             print("  -> forced mode")
-            candidates = scan_sector(sector_df, industry, col_map, forced=True)
+            candidates = scan_sector(targets, industry, col_map, forced=True)
+
         if candidates:
             top5 = sorted(candidates, key=lambda x: (x["score"], x["m_cap"]), reverse=True)[:5]
             now  = now_jst()
@@ -432,9 +431,10 @@ def main():
 
     print("scanning shosha...")
     set_status("current", "商社(総合商社)")
-    shosha_cand = scan_sector(shosha_df, "商社", col_map, forced=False)
+    shosha_targets = get_sector_targets(shosha_df, col_map)
+    shosha_cand = scan_sector(shosha_targets, "商社", col_map, forced=False)
     if not shosha_cand:
-        shosha_cand = scan_sector(shosha_df, "商社", col_map, forced=True)
+        shosha_cand = scan_sector(shosha_targets, "商社", col_map, forced=True)
     if shosha_cand:
         now = now_jst()
         for r in sorted(shosha_cand, key=lambda x: (x["score"], x["m_cap"]), reverse=True):
