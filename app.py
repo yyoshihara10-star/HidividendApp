@@ -144,7 +144,7 @@ else:
 st.divider()
 
 # 操作ボタン
-col1, col2, col3, col4 = st.columns([2, 2, 2, 2])
+col1, col2, col3 = st.columns([2, 2, 2])
 
 with col1:
     if st.button("スキャン開始", type="primary", disabled=(state == "running")):
