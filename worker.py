@@ -19,6 +19,7 @@ def init_db():
     c.execute("""
         CREATE TABLE IF NOT EXISTS scan_results (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
+            scan_id TEXT,
             scanned_at TEXT,
             industry TEXT,
             code INTEGER,
@@ -39,6 +40,15 @@ def init_db():
             value TEXT
         )
     """)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS scan_history (
+            scan_id TEXT PRIMARY KEY,
+            started_at TEXT,
+            finished_at TEXT,
+            result_count INTEGER,
+            status TEXT
+        )
+    """)
     conn.commit()
     conn.close()
 
@@ -48,17 +58,27 @@ def set_status(key, value):
     conn.commit()
     conn.close()
 
-def save_results(rows):
+def save_results(rows, scan_id):
     if not rows:
         return
     conn = sqlite3.connect(DB_PATH)
-    conn.execute("DELETE FROM scan_results")
+    conn.execute("DELETE FROM scan_results WHERE scan_id = ?", (scan_id,))
     conn.executemany("""
         INSERT INTO scan_results
-        (scanned_at, industry, code, name, yield_pct, payout_pct,
+        (scan_id, scanned_at, industry, code, name, yield_pct, payout_pct,
          equity_pct, mcap_oku, judge, stars, note, score)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
     """, rows)
+    conn.commit()
+    conn.close()
+
+def update_history(scan_id, started_at, finished_at, count, status):
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("""
+        INSERT OR REPLACE INTO scan_history
+        (scan_id, started_at, finished_at, result_count, status)
+        VALUES (?,?,?,?,?)
+    """, (scan_id, started_at, finished_at, count, status))
     conn.commit()
     conn.close()
 
@@ -80,15 +100,64 @@ def fetch_jpx_prime():
             col_map["size"] = col
     return df, col_map
 
+def check_dividend_history(ticker):
+    """
+    過去10年の配当履歴を取得し、減配・無配の回数を返す。
+    戻り値: (cut_count, years_checked, detail_str)
+    """
+    try:
+        divs = ticker.dividends
+        if divs is None or len(divs) == 0:
+            return 0, 0, "配当履歴なし"
+
+        divs.index = divs.index.tz_localize(None) if divs.index.tzinfo else divs.index
+        cutoff = pd.Timestamp.now() - pd.DateOffset(years=10)
+        divs   = divs[divs.index >= cutoff]
+
+        if len(divs) == 0:
+            return 0, 0, "配当履歴なし"
+
+        annual = divs.resample("YE").sum()
+        annual = annual[annual > 0]
+
+        if len(annual) < 2:
+            return 0, len(annual), "配当履歴" + str(len(annual)) + "年分"
+
+        years_checked = len(annual)
+        cut_count     = 0
+        cut_years     = []
+
+        for i in range(1, len(annual)):
+            prev = annual.iloc[i - 1]
+            curr = annual.iloc[i]
+            if curr < prev * 0.95:
+                cut_count += 1
+                cut_years.append(str(annual.index[i].year))
+
+        detail = "配当" + str(years_checked) + "年確認"
+        if cut_years:
+            detail += "/減配:" + ",".join(cut_years)
+
+        return cut_count, years_checked, detail
+
+    except Exception as e:
+        return 0, 0, "配当履歴取得失敗"
+
 def check_payout_recovery(info):
     t_eps = info.get("trailingEps")
     f_eps = info.get("forwardEps")
-    if t_eps and f_eps and t_eps != 0 and f_eps > t_eps:
+    if t_eps is not None and f_eps is not None and t_eps != 0 and f_eps > t_eps:
         pct = round((f_eps - t_eps) / abs(t_eps) * 100, 1)
         return True, "業績回復見込み(予EPS+" + str(pct) + "%)"
     rec = (info.get("recommendationKey") or "").lower()
     if rec in ("buy", "strong_buy"):
         return True, "業績回復見込み(アナリスト買い推奨)"
+    rev_g = info.get("revenueGrowth")
+    ear_g = info.get("earningsGrowth")
+    if rev_g is not None and rev_g > 0.05:
+        return True, "業績回復見込み(売上成長+" + str(round(rev_g * 100, 1)) + "%)"
+    if ear_g is not None and ear_g > 0.05:
+        return True, "業績回復見込み(利益成長+" + str(round(ear_g * 100, 1)) + "%)"
     return False, ""
 
 def fetch_info_retry(symbol):
@@ -115,18 +184,37 @@ def analyze(symbol, industry, forced=False):
     info, ticker = fetch_info_retry(symbol)
     if info is None:
         return None
+
     price = info.get("currentPrice") or info.get("previousClose") or 0
     if price == 0:
         return None
+
     div_rate = info.get("dividendRate") or info.get("trailingAnnualDividendRate") or 0
     dy = round(div_rate / price * 100, 2)
+
     if not forced and dy < MIN_YIELD:
         return None
+
     score   = 5
     reasons = []
+
     if forced and dy < MIN_YIELD:
         score -= 1
         reasons.append("利回り" + str(dy) + "%(低め)")
+
+    # 配当履歴チェック（減配・無配）
+    cut_count, years_checked, div_detail = check_dividend_history(ticker)
+    if cut_count >= 2:
+        print("  exclude " + symbol + " div cut " + str(cut_count) + " times")
+        return None
+    elif cut_count == 1:
+        score -= 1
+        reasons.append("減配歴1回(" + div_detail + ")")
+    else:
+        if years_checked > 0:
+            reasons.append(div_detail)
+
+    # 成長性
     rev_g = info.get("revenueGrowth")
     ear_g = info.get("earningsGrowth")
     if rev_g is not None:
@@ -139,12 +227,25 @@ def analyze(symbol, industry, forced=False):
             reasons.append("利益減(" + str(round(ear_g * 100, 1)) + "%)")
     else:
         reasons.append("成長データ不明")
+
+    # EPS成長率を備考に追加
+    t_eps = info.get("trailingEps")
+    f_eps = info.get("forwardEps")
+    if t_eps and f_eps and t_eps != 0:
+        eps_growth = round((f_eps - t_eps) / abs(t_eps) * 100, 1)
+        prefix = "+" if eps_growth >= 0 else ""
+        reasons.append("EPS成長:" + prefix + str(eps_growth) + "%")
+    elif t_eps:
+        reasons.append("EPS:" + str(round(t_eps, 1)))
+
+    # 配当性向
     payout = info.get("payoutRatio") or 0
     if 0 < payout <= 1.0:
         payout *= 100
     if payout > 70:
         ok, note = check_payout_recovery(info)
         if not ok:
+            print("  exclude " + symbol + " payout=" + str(round(payout)) + "%")
             return None
         score -= 1
         reasons.append("配当性向" + str(round(payout)) + "%(一時的)")
@@ -154,6 +255,8 @@ def analyze(symbol, industry, forced=False):
         reasons.append("配当性向" + str(round(payout)) + "%(低)")
     elif payout == 0:
         reasons.append("性向データなし")
+
+    # 自己資本比率
     is_finance = any(x in industry for x in ["銀行", "保険", "証券", "その他金融"])
     eq_ratio   = 0.0
     dte = info.get("debtToEquity")
@@ -162,19 +265,21 @@ def analyze(symbol, industry, forced=False):
         if not is_finance and eq_ratio < 40:
             score -= 1
             reasons.append("自己資本" + str(eq_ratio) + "%")
+
     m_cap = info.get("marketCap") or 0
     star  = max(1, score)
     judge = "〇" if star >= 4 else ("△" if star >= 2 else "×")
+
     return {
-        "dy":    dy,
-        "payout": round(payout, 1),
-        "eq":    eq_ratio,
-        "mcap":  round(m_cap / 100000000) if m_cap else 0,
-        "judge": judge,
-        "stars": "★" * star + "☆" * (5 - star),
-        "note":  " / ".join(reasons) if reasons else "良好(指標クリア)",
-        "score": star,
-        "m_cap": m_cap,
+        "dy":      dy,
+        "payout":  round(payout, 1),
+        "eq":      eq_ratio,
+        "mcap":    round(m_cap / 100000000) if m_cap else 0,
+        "judge":   judge,
+        "stars":   "★" * star + "☆" * (5 - star),
+        "note":    " / ".join(reasons) if reasons else "良好(指標クリア)",
+        "score":   star,
+        "m_cap":   m_cap,
     }
 
 def scan_sector(rows, industry, col_map, forced=False):
@@ -196,14 +301,22 @@ def scan_sector(rows, industry, col_map, forced=False):
     return candidates
 
 def main():
-    print("=== scan start " + datetime.now().strftime("%Y-%m-%d %H:%M:%S") + " ===")
+    started_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    scan_id    = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    os.makedirs("logs", exist_ok=True)
+
+    print("=== scan start " + started_at + " ===")
+    print("scan_id: " + scan_id)
+
     init_db()
     set_status("pid",      str(os.getpid()))
     set_status("state",    "running")
     set_status("progress", "0")
     set_status("current",  "準備中")
-    set_status("started",  datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-    print("PID: " + str(os.getpid()))
+    set_status("started",  started_at)
+    set_status("scan_id",  scan_id)
+    update_history(scan_id, started_at, "", 0, "running")
 
     try:
         df, col_map = fetch_jpx_prime()
@@ -214,6 +327,7 @@ def main():
         print("JPX fetch error: " + str(e))
         set_status("state",   "done")
         set_status("current", "失敗:JPXデータ取得エラー")
+        update_history(scan_id, started_at, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), 0, "error")
         return
 
     missing = [k for k in ["market", "industry", "code", "name"] if k not in col_map]
@@ -221,6 +335,7 @@ def main():
         print("missing columns: " + str(missing))
         set_status("state",   "done")
         set_status("current", "失敗:列が見つかりません " + str(missing))
+        update_history(scan_id, started_at, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), 0, "error")
         return
 
     jpx_df = df[df[col_map["market"]].astype(str).str.contains("プライム")].copy()
@@ -244,12 +359,12 @@ def main():
     all_industries = sorted(non_shosha_df[col_map["industry"]].dropna().unique())
 
     print("industries count: " + str(len(all_industries)))
-    print("industries: " + str(list(all_industries)))
 
     if len(all_industries) == 0:
         print("ERROR: no industries found")
         set_status("state",   "done")
         set_status("current", "失敗:業種データが取得できませんでした")
+        update_history(scan_id, started_at, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), 0, "error")
         return
 
     total       = len(all_industries) + 1
@@ -260,7 +375,6 @@ def main():
         set_status("current",  "[" + str(idx+1) + "/" + str(total) + "] " + industry)
         set_status("progress", str(round((idx / total) * 100)))
         sector_df  = non_shosha_df[non_shosha_df[col_map["industry"]] == industry]
-        print("  sector size: " + str(len(sector_df)))
         candidates = scan_sector(sector_df, industry, col_map, forced=False)
         if not candidates:
             print("  -> forced mode")
@@ -270,11 +384,11 @@ def main():
             now  = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             for r in top5:
                 all_results.append((
-                    now, r["industry"], r["code"], r["name"],
+                    scan_id, now, r["industry"], r["code"], r["name"],
                     r["dy"], r["payout"], r["eq"], r["mcap"],
                     r["judge"], r["stars"], r["note"], r["score"]
                 ))
-            save_results(all_results)
+            save_results(all_results, scan_id)
 
     print("scanning shosha...")
     set_status("current", "商社(総合商社)")
@@ -285,16 +399,18 @@ def main():
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         for r in sorted(shosha_cand, key=lambda x: (x["score"], x["m_cap"]), reverse=True):
             all_results.append((
-                now, r["industry"], r["code"], r["name"],
+                scan_id, now, r["industry"], r["code"], r["name"],
                 r["dy"], r["payout"], r["eq"], r["mcap"],
                 r["judge"], r["stars"], r["note"], r["score"]
             ))
 
-    save_results(all_results)
+    save_results(all_results, scan_id)
+    finished_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     set_status("state",    "done")
     set_status("progress", "100")
-    set_status("finished", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+    set_status("finished", finished_at)
     set_status("current",  "完了(" + str(len(all_results)) + "銘柄)")
+    update_history(scan_id, started_at, finished_at, len(all_results), "done")
     print("=== done: " + str(len(all_results)) + " ===")
 
 if __name__ == "__main__":
