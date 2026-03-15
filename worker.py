@@ -218,9 +218,29 @@ def main():
     set_status("started",  datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
     print("PID: " + str(os.getpid()))
 
-    df, col_map = fetch_jpx_prime()
+    # JPXデータ取得
+    try:
+        df, col_map = fetch_jpx_prime()
+        print("JPX columns: " + str(list(df.columns)))
+        print("col_map: " + str(col_map))
+        print("JPX rows: " + str(len(df)))
+    except Exception as e:
+        print("JPX fetch error: " + str(e))
+        set_status("state", "done")
+        set_status("current", "失敗: JPXデータ取得エラー")
+        return
+
+    # 必須列チェック
+    missing = [k for k in ["market", "industry", "code", "name"] if k not in col_map]
+    if missing:
+        print("missing columns: " + str(missing))
+        set_status("state", "done")
+        set_status("current", "失敗: 列が見つかりません " + str(missing))
+        return
 
     jpx_df = df[df[col_map["market"]].astype(str).str.contains("プライム")].copy()
+    print("prime rows: " + str(len(jpx_df)))
+
     jpx_df[col_map["code"]] = (
         jpx_df[col_map["code"]]
         .astype(str).str.strip()
@@ -237,8 +257,17 @@ def main():
     shosha_df     = jpx_df[jpx_df[col_map["code"]].isin(SOGO_SHOSHA_CODES)]
     non_shosha_df = jpx_df[~jpx_df[col_map["code"]].isin(SOGO_SHOSHA_CODES)]
     all_industries = sorted(non_shosha_df[col_map["industry"]].dropna().unique())
-    total = len(all_industries) + 1
 
+    print("industries count: " + str(len(all_industries)))
+    print("industries: " + str(list(all_industries)))
+
+    if len(all_industries) == 0:
+        print("ERROR: no industries found")
+        set_status("state", "done")
+        set_status("current", "失敗: 業種データが取得できませんでした")
+        return
+
+    total = len(all_industries) + 1
     all_results = []
 
     for idx, industry in enumerate(all_industries):
@@ -247,6 +276,7 @@ def main():
         set_status("progress", str(round((idx / total) * 100)))
 
         sector_df  = non_shosha_df[non_shosha_df[col_map["industry"]] == industry]
+        print("  sector size: " + str(len(sector_df)))
         candidates = scan_sector(sector_df, industry, col_map, forced=False)
 
         if not candidates:
@@ -284,6 +314,14 @@ def main():
     set_status("finished", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
     set_status("current",  "完了(" + str(len(all_results)) + "銘柄)")
     print("=== done: " + str(len(all_results)) + " ===")
+```
+
+スキャン開始後、**実行ログを開いて**以下を確認してください：
+```
+JPX columns: [...]   ← 列名一覧
+col_map: {...}       ← 検出結果
+prime rows: 1550     ← プライム銘柄数
+industries count: 33 ← 業種数（0なら列名検出失敗）
 
 if __name__ == "__main__":
     main()
