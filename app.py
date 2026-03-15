@@ -247,34 +247,6 @@ for row in past_scan_ids:
     if sid not in existing and sid != current_scan_id:
         done_ids[sid] = str(started_at) + "  " + str(cnt) + "銘柄"
 
-# 履歴選択UI
-st.subheader("参照する結果を選択")
-
-if state == "running" and current_scan_id:
-    c1, c2 = st.columns([10, 1])
-    with c1:
-        is_selected = (st.session_state["selected_scan_id"] == current_scan_id)
-        label = "▶ 現在のスキャン（実行中）" if is_selected else "現在のスキャン（実行中）"
-        if st.button(label, key="btn_current", use_container_width=True):
-            st.session_state["selected_scan_id"] = current_scan_id
-            st.rerun()
-
-for sid, info_str in done_ids.items():
-    c1, c2 = st.columns([10, 1])
-    with c1:
-        is_selected = (st.session_state["selected_scan_id"] == sid)
-        label = "▶ " + sid + "  (" + info_str + ")" if is_selected else sid + "  (" + info_str + ")"
-        if st.button(label, key="btn_" + sid, use_container_width=True):
-            st.session_state["selected_scan_id"] = sid
-            st.rerun()
-    with c2:
-        if st.button("🗑", key="del_" + sid):
-            delete_scan(sid)
-            if st.session_state["selected_scan_id"] == sid:
-                st.session_state["selected_scan_id"] = None
-            st.toast(sid + " を削除しました")
-            st.rerun()
-
 # 実行中で未選択の場合は現在のスキャンを自動選択
 if state == "running" and st.session_state["selected_scan_id"] is None and current_scan_id:
     st.session_state["selected_scan_id"] = current_scan_id
@@ -284,8 +256,7 @@ if state == "running":
 
 selected_scan_id = st.session_state["selected_scan_id"]
 
-st.divider()
-
+# スクリーニング結果表示
 df = get_results(selected_scan_id)
 
 if df.empty:
@@ -356,3 +327,32 @@ else:
         "Hidividend_" + dt_str + ".csv",
         "text/csv"
     )
+
+# 履歴選択UI（結果の下に表示）
+st.divider()
+st.subheader("参照する結果を選択")
+
+if state == "running" and current_scan_id:
+    c1, c2 = st.columns([10, 1])
+    with c1:
+        is_selected = (st.session_state["selected_scan_id"] == current_scan_id)
+        label = "▶ 現在のスキャン（実行中）" if is_selected else "現在のスキャン（実行中）"
+        if st.button(label, key="btn_current", use_container_width=True):
+            st.session_state["selected_scan_id"] = current_scan_id
+            st.rerun()
+
+for sid, info_str in done_ids.items():
+    c1, c2 = st.columns([10, 1])
+    with c1:
+        is_selected = (st.session_state["selected_scan_id"] == sid)
+        label = "▶ " + sid + "  (" + info_str + ")" if is_selected else sid + "  (" + info_str + ")"
+        if st.button(label, key="btn_" + sid, use_container_width=True):
+            st.session_state["selected_scan_id"] = sid
+            st.rerun()
+    with c2:
+        if st.button("🗑", key="del_" + sid):
+            delete_scan(sid)
+            if st.session_state["selected_scan_id"] == sid:
+                st.session_state["selected_scan_id"] = None
+            st.toast(sid + " を削除しました")
+            st.rerun()
