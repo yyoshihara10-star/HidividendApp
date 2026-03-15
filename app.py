@@ -104,7 +104,7 @@ if state == "running":
 elif state == "done":
     finished = status.get("finished", "")
     current  = status.get("current", "")
-    st.success("### スキャン完了  " + current + "  (" + finished + ")")
+    st.success("### " + current + "  (" + finished + ")")
 else:
     st.info("### 未実行  スキャン開始ボタンで実行してください")
 
