@@ -215,9 +215,14 @@ def main():
     df, col_map = fetch_jpx_prime()
 
     jpx_df = df[df[col_map['market']].astype(str).str.contains('プライム')].copy()
-    jpx_df[col_map['code']] = pd.to_numeric(jpx_df[col_map['code']], errors='coerce')
-    jpx_df = jpx_df.dropna(subset=[col_map['code']])
-
+jpx_df[col_map['code']] = (
+    jpx_df[col_map['code']]
+    .astype(str)
+    .str.strip()
+    .str.extract(r'(\d{4})', expand=False)  # 4桁の数字を抽出
+)
+jpx_df = jpx_df.dropna(subset=[col_map['code']])
+jpx_df[col_map['code']] = jpx_df[col_map['code']].astype(int)
     if 'size' in col_map:
         size_order = {'大型株': 0, '中型株': 1, '小型株': 2}
         jpx_df['_rank'] = jpx_df[col_map['size']].map(size_order).fillna(3)
