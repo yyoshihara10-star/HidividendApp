@@ -223,4 +223,10 @@ if not st.session_state['result_df'].empty:
     st.dataframe(df_show, use_container_width=True)
     
     # エクセルの文字化けを防ぐため「utf-8-sig (BOM付き)」でエンコード
-    csv =
+    csv = df_show.to_csv(index=False).encode('utf-8-sig')
+    st.download_button(
+        label="📥 結果をCSVでダウンロード（Excel文字化け対策済）",
+        data=csv,
+        file_name='dividend_stocks.csv',
+        mime='text/csv'
+    )
