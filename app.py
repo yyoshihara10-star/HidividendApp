@@ -5,6 +5,7 @@ import subprocess
 import sys
 import os
 import signal
+import time
 from datetime import datetime
 
 st.set_page_config(page_title="プライム高配当株スクリーニング", layout="wide")
@@ -83,13 +84,22 @@ def stop_worker(pid_str):
     except:
         return False
 
-# ステータス取得
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 起動時に不整合状態を自動修正
+# done なのに結果0件 → リセット
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+_status = get_status()
+_state  = _status.get("state", "not_started")
+if _state == "done" and get_results().empty:
+    clear_db()
+
+# ステータス再取得（修正後）
 status = get_status()
 state  = status.get("state", "not_started")
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# 状態バナー（最上部に大きく表示）
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 状態バナー
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 if state == "running":
     progress = int(status.get("progress", 0))
     current  = status.get("current", "...")
@@ -109,20 +119,18 @@ else:
 
 st.divider()
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 操作ボタン
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 col1, col2, col3 = st.columns([2, 2, 2])
 
 with col1:
-    start_disabled = (state == "running")
-    if st.button("スキャン開始", type="primary", disabled=start_disabled):
+    if st.button("スキャン開始", type="primary", disabled=(state == "running")):
         clear_db()
         ok, result = start_worker()
         if ok:
             st.toast("スキャンを開始しました (PID: " + str(result) + ")")
-            time_mod = __import__("time")
-            time_mod.sleep(2)
+            time.sleep(2)
             st.rerun()
         else:
             st.error("起動失敗: " + str(result))
@@ -132,8 +140,7 @@ with col2:
         st.rerun()
 
 with col3:
-    stop_disabled = (state != "running")
-    if st.button("停止・結果削除", type="secondary", disabled=stop_disabled):
+    if st.button("停止・結果削除", type="secondary", disabled=(state != "running")):
         pid = status.get("pid", "")
         if pid:
             stop_worker(pid)
@@ -141,23 +148,24 @@ with col3:
         st.toast("停止しました")
         st.rerun()
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 実行ログ
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 if os.path.exists("worker.log"):
     with st.expander("実行ログ", expanded=(state == "running")):
         with open("worker.log", "r", encoding="utf-8", errors="ignore") as f:
             lines = f.readlines()
         st.code("".join(lines[-50:]), language="text")
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 結果表示
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 st.divider()
 df = get_results()
 
 if df.empty:
-    st.info("結果がありません")
+    if state != "running":
+        st.info("結果がありません")
 else:
     scanned_at = df["スキャン日時"].iloc[0] if "スキャン日時" in df.columns else ""
     display_df = df.drop(columns=["score", "スキャン日時"], errors="ignore")
