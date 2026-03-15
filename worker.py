@@ -480,9 +480,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-```
-
-実行後ログの以下を教えてください：
-```
-size sample values: [...]
-size_code sample values: [...]
