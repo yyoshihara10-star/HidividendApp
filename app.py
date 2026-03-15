@@ -194,7 +194,14 @@ st.divider()
 history_df = get_history()
 selected_scan_id = None
 
-if not history_df.empty:
+# 実行中は現在のscan_idを優先表示
+current_scan_id = status.get("scan_id", None)
+
+if state == "running" and current_scan_id:
+    selected_scan_id = current_scan_id
+    st.caption("現在のスキャン結果をリアルタイム表示中（30秒ごとに自動更新）")
+    st.markdown('<meta http-equiv="refresh" content="30">', unsafe_allow_html=True)
+elif not history_df.empty:
     done_history = history_df[history_df["status"] == "done"]
     if not done_history.empty:
         options = {
@@ -222,7 +229,7 @@ df = get_results(selected_scan_id)
 
 if df.empty:
     if state == "running":
-        st.info("スキャン実行中です。上のセレクターから過去の結果を参照できます。")
+        st.info("スキャン実行中です。結果が取得され次第ここに表示されます。")
     else:
         st.info("結果がありません")
 else:
