@@ -96,6 +96,16 @@ def get_results(scan_id=None):
     except:
         return pd.DataFrame()
 
+def delete_scan(scan_id):
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.execute("DELETE FROM scan_results WHERE scan_id = ?", (scan_id,))
+        conn.execute("DELETE FROM scan_history WHERE scan_id = ?", (scan_id,))
+        conn.commit()
+        conn.close()
+    except:
+        pass
+
 def clear_status():
     try:
         conn = sqlite3.connect(DB_PATH)
@@ -132,6 +142,10 @@ def stop_worker(pid_str):
     except:
         return False
 
+# セッション初期化
+if "selected_scan_id" not in st.session_state:
+    st.session_state["selected_scan_id"] = None
+
 # 起動時に不整合状態を自動修正
 _status = get_status()
 _state  = _status.get("state", "not_started")
@@ -165,6 +179,7 @@ with col1:
     if st.button("スキャン開始", type="primary", disabled=(state == "running")):
         ok, result = start_worker()
         if ok:
+            st.session_state["selected_scan_id"] = status.get("scan_id")
             st.toast("スキャンを開始しました (PID: " + str(result) + ")")
             time.sleep(2)
             st.rerun()
@@ -183,63 +198,79 @@ with col3:
         if pid:
             stop_worker(pid)
         if scan_id:
-            try:
-                conn = sqlite3.connect(DB_PATH)
-                conn.execute("DELETE FROM scan_results WHERE scan_id = ?", (scan_id,))
-                conn.execute("DELETE FROM scan_history WHERE scan_id = ?", (scan_id,))
-                conn.commit()
-                conn.close()
-            except:
-                pass
+            delete_scan(scan_id)
         clear_status()
+        st.session_state["selected_scan_id"] = None
         st.toast("停止しました")
         time.sleep(1)
         st.rerun()
 
-# 実行ログ（最新）
+# 実行ログ
 if os.path.exists("worker.log"):
     with st.expander("実行ログ（最新）", expanded=(state == "running")):
         with open("worker.log", "r", encoding="utf-8", errors="ignore") as f:
             lines = f.readlines()
         st.code("".join(lines[-50:]), language="text")
 
-# 結果表示
 st.divider()
 
-current_scan_id  = status.get("scan_id", None)
-selected_scan_id = None
-history_df       = get_history()
-past_scan_ids    = get_past_scan_ids()
+# 履歴リスト構築
+current_scan_id = status.get("scan_id", None)
+history_df      = get_history()
+past_scan_ids   = get_past_scan_ids()
 
-# options_dictを構築
-# 実行中は「現在のスキャン」を先頭に（デフォルト選択になる）
-options_dict = {}
-
-if state == "running" and current_scan_id:
-    options_dict["現在のスキャン（実行中・随時更新）"] = current_scan_id
-
-# 完了済みをその後に追加
+# 完了済みscan_idを収集
+done_ids = {}
 if not history_df.empty:
-    done_history = history_df[history_df["status"] == "done"]
-    for _, r in done_history.iterrows():
+    for _, r in history_df[history_df["status"] == "done"].iterrows():
         if r["scan_id"] != current_scan_id:
-            key = r["scan_id"] + "  (" + r["started_at"] + "  " + str(r["result_count"]) + "銘柄)"
-            options_dict[key] = r["scan_id"]
+            done_ids[r["scan_id"]] = r["started_at"] + "  " + str(r["result_count"]) + "銘柄"
 
-existing_ids = set(options_dict.values())
+existing = set(done_ids.keys())
 for row in past_scan_ids:
     sid, started_at, cnt = row[0], row[1], row[2]
-    if sid not in existing_ids and sid != current_scan_id:
-        key = sid + "  (" + str(started_at) + "  " + str(cnt) + "銘柄)"
-        options_dict[key] = sid
+    if sid not in existing and sid != current_scan_id:
+        done_ids[sid] = str(started_at) + "  " + str(cnt) + "銘柄"
 
-if options_dict:
-    label_list       = list(options_dict.keys())
-    selected_label   = st.selectbox("参照する結果を選択", label_list)
-    selected_scan_id = options_dict[selected_label]
+# 履歴選択UI（リスト形式＋ゴミ箱ボタン）
+st.subheader("参照する結果を選択")
 
+if state == "running" and current_scan_id:
+    c1, c2 = st.columns([10, 1])
+    with c1:
+        is_current = (st.session_state["selected_scan_id"] == current_scan_id)
+        label = "▶ 現在のスキャン（実行中）" if is_current else "現在のスキャン（実行中）"
+        if st.button(label, key="btn_current", use_container_width=True):
+            st.session_state["selected_scan_id"] = current_scan_id
+            st.rerun()
+
+for sid, info_str in done_ids.items():
+    c1, c2 = st.columns([10, 1])
+    with c1:
+        is_selected = (st.session_state["selected_scan_id"] == sid)
+        label = "▶ " + sid + "  (" + info_str + ")" if is_selected else sid + "  (" + info_str + ")"
+        if st.button(label, key="btn_" + sid, use_container_width=True):
+            st.session_state["selected_scan_id"] = sid
+            st.rerun()
+    with c2:
+        if st.button("🗑", key="del_" + sid):
+            delete_scan(sid)
+            if st.session_state["selected_scan_id"] == sid:
+                st.session_state["selected_scan_id"] = None
+            st.toast(sid + " を削除しました")
+            st.rerun()
+
+# 実行中は自動更新
 if state == "running":
     st.markdown('<meta http-equiv="refresh" content="30">', unsafe_allow_html=True)
+
+# 実行中で未選択の場合は現在のスキャンを自動選択
+if state == "running" and st.session_state["selected_scan_id"] is None and current_scan_id:
+    st.session_state["selected_scan_id"] = current_scan_id
+
+selected_scan_id = st.session_state["selected_scan_id"]
+
+st.divider()
 
 df = get_results(selected_scan_id)
 
