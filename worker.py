@@ -34,6 +34,11 @@ def init_db():
             score INTEGER
         )
     """)
+    existing = [row[1] for row in c.execute("PRAGMA table_info(scan_results)").fetchall()]
+    if "scan_id" not in existing:
+        c.execute("ALTER TABLE scan_results ADD COLUMN scan_id TEXT")
+        print("migrated: added scan_id column")
+
     c.execute("""
         CREATE TABLE IF NOT EXISTS scan_status (
             key TEXT PRIMARY KEY,
@@ -101,10 +106,6 @@ def fetch_jpx_prime():
     return df, col_map
 
 def check_dividend_history(ticker):
-    """
-    過去10年の配当履歴を取得し、減配・無配の回数を返す。
-    戻り値: (cut_count, years_checked, detail_str)
-    """
     try:
         divs = ticker.dividends
         if divs is None or len(divs) == 0:
@@ -202,7 +203,7 @@ def analyze(symbol, industry, forced=False):
         score -= 1
         reasons.append("利回り" + str(dy) + "%(低め)")
 
-    # 配当履歴チェック（減配・無配）
+    # 配当履歴チェック
     cut_count, years_checked, div_detail = check_dividend_history(ticker)
     if cut_count >= 2:
         print("  exclude " + symbol + " div cut " + str(cut_count) + " times")
@@ -228,7 +229,7 @@ def analyze(symbol, industry, forced=False):
     else:
         reasons.append("成長データ不明")
 
-    # EPS成長率を備考に追加
+    # EPS成長率
     t_eps = info.get("trailingEps")
     f_eps = info.get("forwardEps")
     if t_eps and f_eps and t_eps != 0:
@@ -271,15 +272,15 @@ def analyze(symbol, industry, forced=False):
     judge = "〇" if star >= 4 else ("△" if star >= 2 else "×")
 
     return {
-        "dy":      dy,
-        "payout":  round(payout, 1),
-        "eq":      eq_ratio,
-        "mcap":    round(m_cap / 100000000) if m_cap else 0,
-        "judge":   judge,
-        "stars":   "★" * star + "☆" * (5 - star),
-        "note":    " / ".join(reasons) if reasons else "良好(指標クリア)",
-        "score":   star,
-        "m_cap":   m_cap,
+        "dy":    dy,
+        "payout": round(payout, 1),
+        "eq":    eq_ratio,
+        "mcap":  round(m_cap / 100000000) if m_cap else 0,
+        "judge": judge,
+        "stars": "★" * star + "☆" * (5 - star),
+        "note":  " / ".join(reasons) if reasons else "良好(指標クリア)",
+        "score": star,
+        "m_cap": m_cap,
     }
 
 def scan_sector(rows, industry, col_map, forced=False):
