@@ -1,15 +1,16 @@
 # app.py
-# 実行方法: streamlit run app.py
-
 import streamlit as st
 import pandas as pd
 import sqlite3
-import time
+import subprocess
+import sys
+import os
 
 st.set_page_config(page_title="プライム高配当株スクリーニング", layout="wide")
 st.title("高配当株スクリーニング (プライム全業種・全銘柄総当たり版)")
 
-DB_PATH = "results.db"
+DB_PATH     = "results.db"
+WORKER_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "worker.py")
 
 def get_status():
     try:
@@ -25,7 +26,6 @@ def get_results():
         conn = sqlite3.connect(DB_PATH)
         df = pd.read_sql("""
             SELECT
-                scanned_at   AS スキャン日時,
                 industry     AS 業種,
                 code         AS コード,
                 name         AS 銘柄名,
@@ -36,7 +36,8 @@ def get_results():
                 judge        AS 判定,
                 stars        AS おすすめ度,
                 note         AS 備考,
-                score
+                score,
+                scanned_at   AS スキャン日時
             FROM scan_results
             ORDER BY score DESC, mcap_oku DESC
         """, conn)
@@ -45,42 +46,82 @@ def get_results():
     except:
         return pd.DataFrame()
 
-# ── ステータス表示 ──────────────────────────────────────
-status = get_status()
-state  = status.get('state', 'not_started')
+def start_worker():
+    """worker.pyをバックグラウンドプロセスとして起動"""
+    subprocess.Popen(
+        [sys.executable, WORKER_PATH],
+        stdout=open("worker.log", "w"),  # ログをファイルに保存
+        stderr=subprocess.STDOUT,
+        start_new_session=True           # Streamlitと切り離す（ブラウザ閉じても継続）
+    )
 
+# ── ステータス取得 ────────────────────────────────────────
+status  = get_status()
+state   = status.get('state', 'not_started')
+is_running = (state == 'running')
+
+# ── コントロールパネル ────────────────────────────────────
+st.subheader("🎛️ スキャン操作")
+col1, col2, col3 = st.columns([2, 2, 4])
+
+with col1:
+    # 実行中は無効化
+    if st.button(
+        "🚀 スキャン開始",
+        type="primary",
+        disabled=is_running,
+        help="バックグラウンドでスキャンを開始します。ブラウザを閉じても継続します。"
+    ):
+        start_worker()
+        st.rerun()
+
+with col2:
+    if st.button("🔄 状態を更新", disabled=False):
+        st.rerun()
+
+with col3:
+    if state == 'running':
+        started = status.get('started', '')
+        st.info(f"⏳ 実行中（開始: {started}）")
+    elif state == 'done':
+        finished = status.get('finished', '')
+        st.success(f"✅ 完了（{finished}）")
+    elif state == 'not_started':
+        st.warning("未実行 → スキャン開始ボタンで実行できます")
+
+# ── プログレス表示（実行中のみ） ─────────────────────────
 if state == 'running':
     progress = int(status.get('progress', 0))
     current  = status.get('current', '...')
-    started  = status.get('started', '')
+    st.progress(progress / 100, text=f"{progress}%  {current}")
 
-    st.info(f"⏳ スキャン実行中（開始: {started}）")
-    st.progress(progress / 100)
-    st.caption(f"現在: {current}")
+    # 30秒ごとに自動リロード
+    st.caption("※ 30秒ごとに自動更新されます")
+    st.markdown("""
+        <meta http-equiv="refresh" content="30">
+    """, unsafe_allow_html=True)
 
-    # 途中結果を表示
-    df = get_results()
-    if not df.empty:
-        st.caption(f"途中経過: {len(df)} 銘柄取得済み（ページを更新すると最新になります）")
-    
-    # 自動更新ボタン
-    if st.button("🔄 最新状態に更新"):
-        st.rerun()
+# ── ワーカーログ表示（デバッグ用） ────────────────────────
+if os.path.exists("worker.log"):
+    with st.expander("🔎 実行ログ（worker.log）", expanded=False):
+        with open("worker.log", "r", encoding="utf-8", errors="ignore") as f:
+            lines = f.readlines()
+        # 最新50行だけ表示
+        for line in lines[-50:]:
+            st.text(line.rstrip())
 
-elif state == 'done':
-    finished = status.get('finished', '')
-    st.success(f"✅ スキャン完了（完了日時: {finished}）")
-
-else:
-    st.warning("スキャンがまだ実行されていません。")
-    st.code("python worker.py", language="bash")
-    st.caption("上記コマンドをターミナルで実行してください。ブラウザを閉じても動き続けます。")
-
-# ── 結果表示 ────────────────────────────────────────────
+# ── 結果表示 ──────────────────────────────────────────────
+st.divider()
 df = get_results()
 
-if not df.empty:
+if df.empty:
+    st.info("結果がありません。スキャンを実行してください。")
+else:
+    scanned_at = df['スキャン日時'].iloc[0] if 'スキャン日時' in df.columns else ''
     display_df = df.drop(columns=['score', 'スキャン日時'], errors='ignore')
+
+    st.subheader(f"📊 スクリーニング結果  {len(display_df)} 銘柄  （取得: {scanned_at}）")
+
     industries = df['業種'].unique().tolist()
     if "商社" in industries:
         industries = ["商社"] + [i for i in industries if i != "商社"]
@@ -97,3 +138,24 @@ if not df.empty:
 
     csv = display_df.to_csv(index=False).encode('utf-8-sig')
     st.download_button("📥 CSVダウンロード", csv, "prime_high_dividend.csv", "text/csv")
+```
+
+---
+
+### 変更点
+
+| # | 内容 |
+|---|---|
+| ① | **「スキャン開始」ボタンで `worker.py` をバックグラウンド自動起動** |
+| ② | `start_new_session=True` でStreamlitと完全切り離し（ブラウザを閉じても継続） |
+| ③ | スキャン中はボタンを無効化（二重起動防止） |
+| ④ | 実行ログを `worker.log` に保存してUI内で確認可能 |
+| ⑤ | 実行中は**30秒ごとに自動リロード**して進捗を自動更新 |
+
+### ファイル構成
+```
+your_project/
+├── app.py        ← streamlit run app.py だけでOK
+├── worker.py     ← 自動起動される（手動実行不要）
+├── results.db    ← 自動生成
+└── worker.log    ← 自動生成
