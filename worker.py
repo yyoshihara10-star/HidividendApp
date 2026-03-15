@@ -192,7 +192,7 @@ def analyze(symbol, industry, forced=False):
 def scan_sector(rows, industry, col_map, forced=False):
     candidates = []
     for _, row in rows.head(SECTOR_TOP).iterrows():
-        symbol = f"{int(row[col_map['code']])}.T"
+symbol = f"{int(row[col_map['code']]):04d}.T"
         res = analyze(symbol, industry, forced)
         if res:
             res.update({
