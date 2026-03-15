@@ -201,6 +201,10 @@ def analyze(symbol, industry, forced=False):
     div_rate = info.get("dividendRate") or info.get("trailingAnnualDividendRate") or 0
     dy = round(div_rate / price * 100, 2)
 
+if dy > 30:
+        print("  exclude " + symbol + " abnormal yield=" + str(dy))
+        return None
+
     if not forced and dy < MIN_YIELD:
         return None
 
