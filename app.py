@@ -191,39 +191,46 @@ if os.path.exists("worker.log"):
 # 結果表示
 st.divider()
 
-history_df = get_history()
+history_df      = get_history()
+current_scan_id = status.get("scan_id", None)
 selected_scan_id = None
 
-# 実行中は現在のscan_idを優先表示
-current_scan_id = status.get("scan_id", None)
-
-if state == "running" and current_scan_id:
-    selected_scan_id = current_scan_id
-    st.caption("現在のスキャン結果をリアルタイム表示中（30秒ごとに自動更新）")
-    st.markdown('<meta http-equiv="refresh" content="30">', unsafe_allow_html=True)
-elif not history_df.empty:
+if not history_df.empty:
     done_history = history_df[history_df["status"] == "done"]
     if not done_history.empty:
-        options = {
+        options_dict = {
             r["scan_id"] + "  (" + r["started_at"] + "  " + str(r["result_count"]) + "銘柄)": r["scan_id"]
             for _, r in done_history.iterrows()
         }
-        label_list = list(options.keys())
-        selected_label = st.selectbox("参照する結果を選択", label_list)
-        selected_scan_id = options[selected_label]
+        if state == "running" and current_scan_id:
+            options_dict = {"現在のスキャン（実行中）": current_scan_id} | options_dict
 
-        with st.expander("過去の実行ログを参照", expanded=False):
-            log_files = sorted(
-                [f for f in os.listdir("logs") if f.startswith("worker_") and f.endswith(".log")],
-                reverse=True
-            ) if os.path.exists("logs") else []
-            if log_files:
-                selected_log = st.selectbox("ログファイル", ["選択してください"] + log_files)
-                if selected_log != "選択してください":
-                    with open(os.path.join("logs", selected_log), "r", encoding="utf-8", errors="ignore") as f:
-                        st.code(f.read(), language="text")
-            else:
-                st.info("ログファイルがありません")
+        label_list       = list(options_dict.keys())
+        selected_label   = st.selectbox("参照する結果を選択", label_list)
+        selected_scan_id = options_dict[selected_label]
+    elif state == "running" and current_scan_id:
+        selected_scan_id = current_scan_id
+        st.caption("現在のスキャン結果をリアルタイム表示中")
+elif state == "running" and current_scan_id:
+    selected_scan_id = current_scan_id
+    st.caption("現在のスキャン結果をリアルタイム表示中")
+
+# 実行中は30秒自動更新
+if state == "running":
+    st.markdown('<meta http-equiv="refresh" content="30">', unsafe_allow_html=True)
+
+with st.expander("過去の実行ログを参照", expanded=False):
+    log_files = sorted(
+        [f for f in os.listdir("logs") if f.startswith("worker_") and f.endswith(".log")],
+        reverse=True
+    ) if os.path.exists("logs") else []
+    if log_files:
+        selected_log = st.selectbox("ログファイル", ["選択してください"] + log_files)
+        if selected_log != "選択してください":
+            with open(os.path.join("logs", selected_log), "r", encoding="utf-8", errors="ignore") as f:
+                st.code(f.read(), language="text")
+    else:
+        st.info("ログファイルがありません")
 
 df = get_results(selected_scan_id)
 
