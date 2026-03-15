@@ -2,8 +2,8 @@ import streamlit as st
 import pandas as pd
 import yfinance as yf
 
-st.set_page_config(page_title="プライム高配当株・究極版", layout="wide")
-st.title("高配当株スクリーニング (総合商社別枠・ハイライト版)")
+st.set_page_config(page_title="プライム高配当株・決定版", layout="wide")
+st.title("高配当株スクリーニング (総合商社別枠・ハイライト修正版)")
 
 if 'result_df' not in st.session_state:
     st.session_state['result_df'] = pd.DataFrame()
@@ -17,20 +17,21 @@ def fetch_jpx_prime():
     except:
         return pd.DataFrame()
 
-def analyze_stock_ultimate(symbol, industry):
+def analyze_stock_fixed(symbol, industry):
     stock = yf.Ticker(symbol)
     info = stock.info
     
-    # 1. 利回り取得の修正（SCSK対策：複数の値から妥当なものを選択）
+    # 1. 利回り取得の修正 (SCSK等の分割対策)
     price = info.get('currentPrice') or info.get('previousClose') or 1.0
-    # 実績利回り(yield)が取れる場合はそれを優先、なければ計算
-    dy_raw = info.get('trailingAnnualDividendYield')
-    if dy_raw and dy_raw > 0:
-        dy = round(dy_raw * 100, 2)
+    # 複数のソースから利回りを確認
+    dy_val = info.get('trailingAnnualDividendYield') or info.get('yield')
+    if dy_val and dy_val > 0:
+        dy = round(dy_val * 100, 2)
     else:
         div_rate = info.get('dividendRate') or info.get('trailingAnnualDividendRate', 0)
         dy = round((div_rate / price * 100), 2)
     
+    # 利回り3%未満はスキップ
     if dy < 3.0: return None
 
     score = 5
@@ -55,8 +56,13 @@ def analyze_stock_ultimate(symbol, industry):
 
     bs = stock.balance_sheet
     eq_ratio = 0.0
-    # 総合商社（卸売業から分離後）も金融同様に自己資本比率の判定を緩める
-    is_special = any(x in industry for x in ['銀行', '保険', '証券', 'その他金融', '総合商社'])
+    # 総合商社判定
+    sogo_shosha_codes = [8001, 8002, 8031, 8053, 8058, 2768, 8015]
+    is_shosha = int(symbol.replace('.T','')) in sogo_shosha_codes
+    current_industry = "総合商社" if is_shosha else industry
+    
+    is_special = any(x in current_industry for x in ['銀行', '保険', '証券', 'その他金融', '総合商社'])
+    
     if 'Stockholders Equity' in bs.index and 'Total Assets' in bs.index:
         try:
             eq_ratio = round((bs.loc['Stockholders Equity'].iloc[0] / bs.loc['Total Assets'].iloc[0]) * 100, 1)
@@ -67,10 +73,6 @@ def analyze_stock_ultimate(symbol, industry):
     star_score = max(1, score)
     judge = "〇" if star_score >= 4 else ("△" if star_score >= 2 else "×")
     
-    # 「総合商社」判定（卸売業のうち、特定の大型銘柄）
-    sogo_shosha_codes = [8001, 8002, 8031, 8053, 8058, 2768, 8015] # 伊藤忠, 丸紅, 三井, 住友, 三菱, 双日, 豊田通商
-    current_industry = "総合商社" if int(symbol.replace('.T','')) in sogo_shosha_codes else industry
-
     return {
         '業種': current_industry, '利回り(%)': dy, '性向(%)': round(payout, 1), 
         '自己資本(%)': eq_ratio, '判定': judge, 'おすすめ度': "★" * star_score + "☆" * (5 - star_score),
@@ -95,15 +97,15 @@ if st.button("🚀 最終分析スキャン実行", type="primary"):
         for _, row in sector_members.iterrows():
             code = f"{row['コード']}.T"
             try:
-                res = analyze_stock_ultimate(code, industry)
+                res = analyze_stock_fixed(code, industry)
                 if res:
                     res.update({'コード': row['コード'], '銘柄名': row['銘柄名']})
                     sector_candidates.append(res)
             except: continue
         
         if sector_candidates:
+            # 業界全数から時価総額順でソート
             sector_sorted = sorted(sector_candidates, key=lambda x: x['m_cap'], reverse=True)
-            # 業種ごとにスコアと時価総額で上位を抽出
             final_results.extend(sector_sorted[:5])
         
         progress_bar.progress((idx + 1) / len(all_industries))
@@ -111,19 +113,31 @@ if st.button("🚀 最終分析スキャン実行", type="primary"):
     if final_results:
         cols = ['業種', 'コード', '銘柄名', '利回り(%)', '性向(%)', '自己資本(%)', '判定', 'おすすめ度', '備考']
         df = pd.DataFrame(final_results)[cols]
-        # 「総合商社」が混ざっているので、最後にもう一度業種でソート
+        # 業種順 ＞ おすすめ度（星の数）順にソート
         st.session_state['result_df'] = df.sort_values(['業種', 'おすすめ度'], ascending=[True, False])
         st.success("スキャン完了！")
 
-def highlight_max_stars(s):
-    """各業種で最高評価の銘柄をハイライト"""
-    is_max = s['おすすめ度'] == s.groupby(st.session_state['result_df']['業種'])['おすすめ度'].transform('max')
-    return ['background-color: #fdf2f2' if v else '' for v in is_max] # 薄い赤色でハイライト
+def highlight_rows(df):
+    """各業種で最高評価の行をハイライトするスタイル関数"""
+    # 背景色を保持する DataFrame を作成
+    style_df = pd.DataFrame('', index=df.index, columns=df.columns)
+    
+    for industry in df['業種'].unique():
+        # その業種の中での最大スコア（星の数）を特定
+        subset = df[df['業種'] == industry]
+        max_stars = subset['おすすめ度'].max()
+        # 最大スコアを持つ行のインデックスを取得
+        target_indices = subset[subset['おすすめ度'] == max_stars].index
+        for idx in target_indices:
+            style_df.loc[idx, :] = 'background-color: #FFF2CC' # 薄いオレンジ
+            
+    return style_df
 
 if not st.session_state['result_df'].empty:
-    # 表示用のスタイル適用
-    styled_df = st.session_state['result_df'].style.apply(highlight_max_stars, axis=None)
+    df_to_show = st.session_state['result_df'].reset_index(drop=True)
+    # スタイル適用（エラーを回避する新しい書き方）
+    styled_df = df_to_show.style.apply(highlight_rows, axis=None)
     st.dataframe(styled_df, use_container_width=True)
     
-    csv = st.session_state['result_df'].to_csv(index=False).encode('utf-8-sig')
-    st.download_button("📥 最終結果CSVダウンロード", csv, "prime_ultimate_dividend.csv", "text/csv")
+    csv = df_to_show.to_csv(index=False).encode('utf-8-sig')
+    st.download_button("📥 最終結果CSVダウンロード", csv, "prime_high_dividend_final.csv", "text/csv")
