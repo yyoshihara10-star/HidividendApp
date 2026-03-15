@@ -68,15 +68,15 @@ def fetch_jpx_prime():
     col_map = {}
     for col in df.columns:
         c = str(col).strip()
-        if "市場" in c or "商品区分" in c:
-            col_map["market"] = col
-        elif "33業種" in c or "業種区分" in c:
-            col_map["industry"] = col
-        elif "コード" in c:
+        if c == "コード":
             col_map["code"] = col
-        elif "銘柄" in c or "名称" in c:
+        elif c == "銘柄名":
             col_map["name"] = col
-        elif "規模" in c:
+        elif "市場" in c or "商品区分" in c:
+            col_map["market"] = col
+        elif "33業種区分" in c:
+            col_map["industry"] = col
+        elif "規模区分" in c:
             col_map["size"] = col
     return df, col_map
 
