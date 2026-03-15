@@ -8,6 +8,7 @@ import sqlite3
 import time
 import random
 import json
+import os
 from datetime import datetime
 
 SOGO_SHOSHA_CODES = {8058, 8031, 8001, 8053, 8002, 8015, 2768}
@@ -207,6 +208,7 @@ symbol = f"{int(row[col_map['code']]):04d}.T"
 def main():
     print(f"=== スキャン開始: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ===")
     init_db()
+set_status('pid', str(os.getpid()))
     set_status('state',    'running')
     set_status('progress', '0')
     set_status('current',  '準備中')
