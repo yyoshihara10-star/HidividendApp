@@ -181,23 +181,6 @@ with col3:
         time.sleep(1)
         st.rerun()
 
-with col4:
-    if st.button("DBマイグレーション", type="secondary", disabled=(state == "running")):
-        try:
-            conn = sqlite3.connect(DB_PATH)
-            existing = [row[1] for row in conn.execute("PRAGMA table_info(scan_results)").fetchall()]
-            if "scan_id" not in existing:
-                conn.execute("ALTER TABLE scan_results ADD COLUMN scan_id TEXT")
-                conn.commit()
-                st.toast("マイグレーション完了（scan_id列を追加しました）")
-            else:
-                st.toast("すでにマイグレーション済みです")
-            conn.close()
-            time.sleep(1)
-            st.rerun()
-        except Exception as e:
-            st.error("失敗: " + str(e))
-
 # 実行ログ（最新）
 if os.path.exists("worker.log"):
     with st.expander("実行ログ（最新）", expanded=(state == "running")):
