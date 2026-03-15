@@ -211,9 +211,14 @@ selected_scan_id = None
 history_df       = get_history()
 past_scan_ids    = get_past_scan_ids()
 
-# options_dictを構築（完了済みを先頭・実行中を末尾）
+# options_dictを構築
+# 実行中は「現在のスキャン」を先頭に（デフォルト選択になる）
 options_dict = {}
 
+if state == "running" and current_scan_id:
+    options_dict["現在のスキャン（実行中・随時更新）"] = current_scan_id
+
+# 完了済みをその後に追加
 if not history_df.empty:
     done_history = history_df[history_df["status"] == "done"]
     for _, r in done_history.iterrows():
@@ -227,9 +232,6 @@ for row in past_scan_ids:
     if sid not in existing_ids and sid != current_scan_id:
         key = sid + "  (" + str(started_at) + "  " + str(cnt) + "銘柄)"
         options_dict[key] = sid
-
-if state == "running" and current_scan_id:
-    options_dict["現在のスキャン（実行中・随時更新）"] = current_scan_id
 
 if options_dict:
     label_list       = list(options_dict.keys())
