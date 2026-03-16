@@ -127,9 +127,6 @@ def get_sector_targets(sector_df, col_map):
         return df.head(30)
 
     if "size" in col_map and col_map["size"] in df.columns:
-        size_vals = df[col_map["size"]].astype(str).str.strip().unique().tolist()
-        print("  size values: " + str(size_vals))
-
         def size_rank(v):
             v = str(v).strip()
             if "大型" in v or "large" in v.lower():
@@ -140,7 +137,6 @@ def get_sector_targets(sector_df, col_map):
                 return 3
             else:
                 return 99
-
         df["_sort"] = df[col_map["size"]].apply(size_rank)
         df = df.sort_values("_sort")
         return df.head(30)
@@ -199,6 +195,45 @@ def check_dividend_history(ticker):
     except Exception as e:
         return 0, 0, False, "配当履歴取得失敗"
 
+def get_payout_ratio(info, ticker):
+    """
+    配当性向を自力計算する。
+    yfinanceのpayoutRatioは使用しない。
+    予想EPS(forwardEps)を優先し、無い場合は実績EPS(trailingEps)を使用。
+    EPSがマイナスまたは取得不可の場合は0を返す。
+    """
+    f_eps = info.get("forwardEps")
+    t_eps = info.get("trailingEps")
+
+    # 予想EPSを優先、なければ実績EPSを使用
+    eps = f_eps if (f_eps is not None and f_eps > 0) else t_eps
+
+    # EPSがマイナス（赤字）またはデータなしの場合は計算不可
+    if eps is None or eps <= 0:
+        return 0
+
+    div_rate = info.get("dividendRate") or info.get("trailingAnnualDividendRate") or 0
+
+    if div_rate == 0:
+        try:
+            divs = ticker.dividends
+            if divs is not None and len(divs) > 0:
+                divs.index = divs.index.tz_localize(None) if divs.index.tzinfo else divs.index
+                cutoff = pd.Timestamp.now() - pd.DateOffset(years=1)
+                div_rate = divs[divs.index >= cutoff].sum()
+        except:
+            pass
+
+    if div_rate <= 0:
+        return 0
+
+    payout = round(div_rate / eps * 100, 1)
+
+    if payout <= 0 or payout > 1000:
+        return 0
+
+    return payout
+
 def check_payout_recovery(info):
     t_eps = info.get("trailingEps")
     f_eps = info.get("forwardEps")
@@ -224,7 +259,7 @@ def get_equity_ratio(info, ticker, is_finance):
     try:
         bs = ticker.balance_sheet
         if bs is not None and not bs.empty:
-            eq_keys    = [
+            eq_keys = [
                 "Stockholders Equity",
                 "Total Stockholder Equity",
                 "Common Stock Equity",
@@ -331,6 +366,7 @@ def analyze(symbol, industry, forced=False):
     else:
         reasons.append("成長データ不明")
 
+    # EPS成長率の表示（実績→予想）
     t_eps = info.get("trailingEps")
     f_eps = info.get("forwardEps")
     if t_eps and f_eps and t_eps != 0:
@@ -342,12 +378,8 @@ def analyze(symbol, industry, forced=False):
     elif t_eps:
         reasons.append("EPS:" + str(round(t_eps, 1)) + "円(予想データなし)")
 
-    payout = info.get("payoutRatio") or 0
-    if 0 < payout <= 1.0:
-        payout *= 100
-    if 0 < payout < 1.0:
-        payout = 0
-        reasons.append("性向データ異常")
+    # 配当性向（予想EPSを優先して計算）
+    payout = get_payout_ratio(info, ticker)
 
     if payout > 70:
         ok, note = check_payout_recovery(info)
@@ -365,7 +397,7 @@ def analyze(symbol, industry, forced=False):
 
     is_finance = any(x in industry for x in ["銀行", "保険", "証券", "その他金融"])
     eq_ratio   = get_equity_ratio(info, ticker, is_finance)
-    if eq_ratio < 40 and not is_finance and eq_ratio > 0:
+    if eq_ratio > 0 and eq_ratio < 40 and not is_finance:
         score -= 1
         reasons.append("自己資本" + str(eq_ratio) + "%")
 
