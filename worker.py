@@ -143,19 +143,12 @@ def get_sector_targets(sector_df, col_map):
 
         df["_sort"] = df[col_map["size"]].apply(size_rank)
         df = df.sort_values("_sort")
-        large_count = len(df[df["_sort"] == 1])
-        print("  large:" + str(large_count) + " total:" + str(len(df)))
         return df.head(30)
 
     print("  no size info, using head 30")
     return df.head(30)
 
 def check_dividend_history(ticker):
-    """
-    過去10年の配当履歴を分析。
-    戻り値: (cut_count, years_checked, is_increasing_trend, detail_str)
-    is_increasing_trend: 10年全体で配当が増加傾向かどうか
-    """
     try:
         divs = ticker.dividends
         if divs is None or len(divs) == 0:
@@ -185,7 +178,6 @@ def check_dividend_history(ticker):
                 cut_count += 1
                 cut_years.append(str(annual.index[i].year))
 
-        # 増加傾向の判定: 最初の3年平均 vs 最後の3年平均で比較
         is_increasing = False
         if len(annual) >= 4:
             early_avg = annual.iloc[:3].mean()
@@ -223,6 +215,41 @@ def check_payout_recovery(info):
     if ear_g is not None and ear_g > 0.05:
         return True, "業績回復見込み(利益成長+" + str(round(ear_g * 100, 1)) + "%)"
     return False, ""
+
+def get_equity_ratio(info, ticker, is_finance):
+    """
+    自己資本比率を取得。
+    debtToEquity -> balance_sheet の順でフォールバック。
+    """
+    # 方法1: debtToEquity から計算
+    dte = info.get("debtToEquity")
+    if dte is not None and dte > 0:
+        eq = round(100 / (1 + dte / 100), 1)
+        if eq > 0:
+            return eq
+
+    # 方法2: balance_sheet から直接計算
+    try:
+        bs = ticker.balance_sheet
+        if bs is not None and not bs.empty:
+            eq_keys    = ["Stockholders Equity", "Total Stockholder Equity", "Common Stock Equity"]
+            asset_keys = ["Total Assets"]
+            eq_val     = None
+            asset_val  = None
+            for k in eq_keys:
+                if k in bs.index:
+                    eq_val = bs.loc[k].iloc[0]
+                    break
+            for k in asset_keys:
+                if k in bs.index:
+                    asset_val = bs.loc[k].iloc[0]
+                    break
+            if eq_val is not None and asset_val is not None and asset_val > 0:
+                return round(eq_val / asset_val * 100, 1)
+    except:
+        pass
+
+    return 0.0
 
 def fetch_info_retry(symbol):
     for attempt in range(MAX_RETRY):
@@ -273,17 +300,14 @@ def analyze(symbol, industry, forced=False):
         score -= 1
         reasons.append("利回り" + str(dy) + "%(低め)")
 
-    # 配当履歴チェック（増加傾向も取得）
     cut_count, years_checked, is_increasing, div_detail = check_dividend_history(ticker)
 
     if cut_count >= 2:
         if is_increasing:
-            # 増加傾向あり → 2回まで許容・スコア減点して継続
             score -= 2
             reasons.append("減配歴" + str(cut_count) + "回(" + div_detail + "/増加傾向のため継続)")
             print("    div cut " + str(cut_count) + " but increasing trend: include with penalty")
         else:
-            # 増加傾向なし → 除外
             print("    reason: div cut " + str(cut_count) + " times no increasing trend")
             return None
     elif cut_count == 1:
@@ -293,7 +317,6 @@ def analyze(symbol, industry, forced=False):
         if years_checked > 0:
             reasons.append(div_detail)
 
-    # 成長性
     rev_g = info.get("revenueGrowth")
     ear_g = info.get("earningsGrowth")
     if rev_g is not None:
@@ -307,7 +330,6 @@ def analyze(symbol, industry, forced=False):
     else:
         reasons.append("成長データ不明")
 
-    # EPS成長率
     t_eps = info.get("trailingEps")
     f_eps = info.get("forwardEps")
     if t_eps and f_eps and t_eps != 0:
@@ -319,11 +341,9 @@ def analyze(symbol, industry, forced=False):
     elif t_eps:
         reasons.append("EPS:" + str(round(t_eps, 1)) + "円(予想データなし)")
 
-    # 配当性向
     payout = info.get("payoutRatio") or 0
     if 0 < payout <= 1.0:
         payout *= 100
-    # 1%未満は取得失敗とみなす
     if 0 < payout < 1.0:
         payout = 0
         reasons.append("性向データ異常")
@@ -342,15 +362,11 @@ def analyze(symbol, industry, forced=False):
     elif payout == 0:
         reasons.append("性向データなし")
 
-    # 自己資本比率
     is_finance = any(x in industry for x in ["銀行", "保険", "証券", "その他金融"])
-    eq_ratio   = 0.0
-    dte = info.get("debtToEquity")
-    if dte is not None and dte >= 0:
-        eq_ratio = round(100 / (1 + dte / 100), 1)
-        if not is_finance and eq_ratio < 40:
-            score -= 1
-            reasons.append("自己資本" + str(eq_ratio) + "%")
+    eq_ratio   = get_equity_ratio(info, ticker, is_finance)
+    if eq_ratio < 40 and not is_finance and eq_ratio > 0:
+        score -= 1
+        reasons.append("自己資本" + str(eq_ratio) + "%")
 
     m_cap = info.get("marketCap") or 0
     star  = max(1, score)
