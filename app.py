@@ -51,9 +51,26 @@ def get_past_scan_ids():
     except:
         return []
 
+def get_latest_scan_id():
+    """最新のscan_idを取得"""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        row = conn.execute("""
+            SELECT scan_id FROM scan_results
+            WHERE scan_id IS NOT NULL
+            ORDER BY scanned_at DESC LIMIT 1
+        """).fetchone()
+        conn.close()
+        return row[0] if row else None
+    except:
+        return None
+
 def get_results(scan_id=None):
     try:
         conn = sqlite3.connect(DB_PATH)
+        # scan_idが指定されていない場合は最新のscan_idを使用（全件混在を防ぐ）
+        if not scan_id:
+            scan_id = get_latest_scan_id()
         if scan_id:
             df = pd.read_sql("""
                 SELECT
@@ -74,23 +91,7 @@ def get_results(scan_id=None):
                 ORDER BY score DESC, mcap_oku DESC
             """, conn, params=(scan_id,))
         else:
-            df = pd.read_sql("""
-                SELECT
-                    industry     AS 業種,
-                    code         AS コード,
-                    name         AS 銘柄名,
-                    yield_pct    AS '利回り(%)',
-                    payout_pct   AS '配当性向(%)',
-                    equity_pct   AS '自己資本(%)',
-                    mcap_oku     AS '時価総額(億)',
-                    judge        AS 判定,
-                    stars        AS おすすめ度,
-                    note         AS 備考,
-                    score,
-                    scanned_at   AS スキャン日時
-                FROM scan_results
-                ORDER BY score DESC, mcap_oku DESC
-            """, conn)
+            df = pd.DataFrame()
         conn.close()
         return df
     except:
@@ -281,7 +282,8 @@ else:
             return ["background-color: #fff9c4; font-weight: bold"] * len(row)
         return [""] * len(row)
 
-    label = "  (" + (selected_scan_id if selected_scan_id else "最新") + ")"
+    disp_id = selected_scan_id if selected_scan_id else get_latest_scan_id()
+    label   = "  (" + (disp_id if disp_id else "最新") + ")"
     st.subheader("スクリーニング結果  " + str(len(display_df)) + " 銘柄" + label)
     st.caption("黄色ハイライト = 各業種トップ推奨（同率の場合は複数）")
 
