@@ -218,32 +218,33 @@ def check_payout_recovery(info):
 
 def get_equity_ratio(info, ticker, is_finance):
     """
-    自己資本比率を取得。
-    debtToEquity -> balance_sheet の順でフォールバック。
+    貸借対照表から自己資本と総資産を直接取得して計算する。
+    debtToEquityは有利子負債のみで無利子負債が抜け落ちるため使用しない。
     """
-    # 方法1: debtToEquity から計算
-    dte = info.get("debtToEquity")
-    if dte is not None and dte > 0:
-        eq = round(100 / (1 + dte / 100), 1)
-        if eq > 0:
-            return eq
-
-    # 方法2: balance_sheet から直接計算
     try:
         bs = ticker.balance_sheet
         if bs is not None and not bs.empty:
-            eq_keys    = ["Stockholders Equity", "Total Stockholder Equity", "Common Stock Equity"]
+            eq_keys    = [
+                "Stockholders Equity",
+                "Total Stockholder Equity",
+                "Common Stock Equity",
+                "Total Equity Gross Minority Interest"
+            ]
             asset_keys = ["Total Assets"]
-            eq_val     = None
-            asset_val  = None
+
+            eq_val    = None
+            asset_val = None
+
             for k in eq_keys:
                 if k in bs.index:
                     eq_val = bs.loc[k].iloc[0]
                     break
+
             for k in asset_keys:
                 if k in bs.index:
                     asset_val = bs.loc[k].iloc[0]
                     break
+
             if eq_val is not None and asset_val is not None and asset_val > 0:
                 return round(eq_val / asset_val * 100, 1)
     except:
