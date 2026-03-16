@@ -19,7 +19,7 @@ st.caption(
     "自己資本比率 バランスシートから自己資本÷総資産で直接計算（有利子負債のみのdebtToEquityは不使用）・40%未満は減点（銀行・保険・証券・その他金融業は適用除外）　／　"
     "成長性 売上または利益が減少傾向の場合は減点　／　"
     "スコアリング 上記条件を5点満点の減点方式で評価し業種内上位5社を選出・総合商社は独立業種として全7社を評価　／　"
-    "各業種のおすすめ銘柄を色付きで表示"
+    "★各業種のおすすめ銘柄を黄色でハイライト表示（同率の場合は複数）"
 )
 
 DB_PATH     = "results.db"
@@ -161,6 +161,20 @@ def read_log(tail=None):
         lines = lines[-tail:]
     return "".join(lines)
 
+def add_star_to_best(df, display_df, best_per_industry):
+    """各業種トップ推奨銘柄の備考冒頭に★を付加したDataFrameを返す"""
+    result = display_df.copy()
+    for idx, row in result.iterrows():
+        industry  = row["業種"]
+        name      = row["銘柄名"]
+        best      = best_per_industry.get(industry, -1)
+        score_val = df.loc[
+            (df["業種"] == industry) & (df["銘柄名"] == name), "score"
+        ].values
+        if len(score_val) > 0 and score_val[0] == best:
+            result.at[idx, "備考"] = "★" + str(row["備考"])
+    return result
+
 # セッション初期化
 if "selected_scan_id" not in st.session_state:
     st.session_state["selected_scan_id"] = None
@@ -280,6 +294,9 @@ else:
 
     best_per_industry = df.groupby("業種")["score"].max().to_dict()
 
+    # CSV用に★付きのDataFrameを作成
+    starred_df = add_star_to_best(df, display_df, best_per_industry)
+
     def highlight_best(row):
         score_val = df.loc[
             (df["業種"] == row["業種"]) &
@@ -294,7 +311,7 @@ else:
     disp_id = selected_scan_id if selected_scan_id else get_latest_scan_id()
     label   = "  (" + (disp_id if disp_id else "最新") + ")"
     st.subheader("スクリーニング結果  " + str(len(display_df)) + " 銘柄" + label)
-    st.caption("黄色ハイライト = 各業種トップ推奨（同率の場合は複数）")
+    st.caption("黄色ハイライト・備考欄★ = 各業種トップ推奨（同率の場合は複数）")
 
     industries = df["業種"].unique().tolist()
     if "商社" in industries:
@@ -304,13 +321,13 @@ else:
 
     with tabs[0]:
         st.dataframe(
-            display_df.style.apply(highlight_best, axis=1),
+            starred_df.style.apply(highlight_best, axis=1),
             use_container_width=True
         )
 
     for tab, ind in zip(tabs[1:], industries):
         with tab:
-            ind_df = display_df[display_df["業種"] == ind].reset_index(drop=True)
+            ind_df = starred_df[starred_df["業種"] == ind].reset_index(drop=True)
             best   = best_per_industry.get(ind, -1)
             def highlight_ind(row, b=best, i=ind):
                 score_val = df.loc[
@@ -331,7 +348,8 @@ else:
     except:
         dt_str = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-    csv = display_df.to_csv(index=False).encode("utf-8-sig")
+    # CSVは★付きデータで出力
+    csv = starred_df.to_csv(index=False).encode("utf-8-sig")
     st.download_button(
         "CSVダウンロード",
         csv,
