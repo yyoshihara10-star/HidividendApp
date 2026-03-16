@@ -205,10 +205,8 @@ def get_payout_ratio(info, ticker):
     f_eps = info.get("forwardEps")
     t_eps = info.get("trailingEps")
 
-    # 予想EPSを優先、なければ実績EPSを使用
     eps = f_eps if (f_eps is not None and f_eps > 0) else t_eps
 
-    # EPSがマイナス（赤字）またはデータなしの場合は計算不可
     if eps is None or eps <= 0:
         return 0
 
@@ -366,7 +364,6 @@ def analyze(symbol, industry, forced=False):
     else:
         reasons.append("成長データ不明")
 
-    # EPS成長率の表示（実績→予想）
     t_eps = info.get("trailingEps")
     f_eps = info.get("forwardEps")
     if t_eps and f_eps and t_eps != 0:
@@ -378,8 +375,11 @@ def analyze(symbol, industry, forced=False):
     elif t_eps:
         reasons.append("EPS:" + str(round(t_eps, 1)) + "円(予想データなし)")
 
-    # 配当性向（予想EPSを優先して計算）
+    # 配当性向（計算できない場合は除外）
     payout = get_payout_ratio(info, ticker)
+    if payout == 0:
+        print("    reason: payout cannot be calculated")
+        return None
 
     if payout > 70:
         ok, note = check_payout_recovery(info)
@@ -389,11 +389,9 @@ def analyze(symbol, industry, forced=False):
         score -= 1
         reasons.append("配当性向" + str(round(payout)) + "%(一時的)")
         reasons.append(note)
-    elif 0 < payout < 30:
+    elif payout < 30:
         score -= 1
         reasons.append("配当性向" + str(round(payout)) + "%(低)")
-    elif payout == 0:
-        reasons.append("性向データなし")
 
     is_finance = any(x in industry for x in ["銀行", "保険", "証券", "その他金融"])
     eq_ratio   = get_equity_ratio(info, ticker, is_finance)
