@@ -11,6 +11,16 @@ from datetime import datetime
 st.set_page_config(page_title="プライム高配当株スクリーニング", layout="wide")
 st.title("高配当株スクリーニング (プライム全業種・全銘柄総当たり版)")
 
+st.caption(
+    "【スクリーニング条件】 東証プライム全業種・各業種時価総額上位30社（規模コード順）を対象　／　"
+    "利回り 3.0%以上（異常値30%超は除外）　／　"
+    "配当性向 予想EPS優先・実績EPSで自力計算（計算不可・EPSマイナスは除外）／ 70%超で業績回復見込みなければ除外・30%未満は減点　／　"
+    "減配履歴 過去10年で2回以上かつ配当増加傾向なしは除外・1回は減点・2回以上でも増加傾向あれば減点付きで継続　／　"
+    "自己資本比率 バランスシートから自己資本÷総資産で直接計算（有利子負債のみのdebtToEquityは不使用）・40%未満は減点（銀行・保険・証券・その他金融業は適用除外）　／　"
+    "成長性 売上または利益が減少傾向の場合は減点　／　"
+    "スコアリング 上記条件を5点満点の減点方式で評価し業種内上位5社を選出・総合商社は独立業種として全7社を評価"
+)
+
 DB_PATH     = "results.db"
 WORKER_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "worker.py")
 
@@ -52,7 +62,6 @@ def get_past_scan_ids():
         return []
 
 def get_latest_scan_id():
-    """最新のscan_idを取得"""
     try:
         conn = sqlite3.connect(DB_PATH)
         row = conn.execute("""
@@ -68,7 +77,6 @@ def get_latest_scan_id():
 def get_results(scan_id=None):
     try:
         conn = sqlite3.connect(DB_PATH)
-        # scan_idが指定されていない場合は最新のscan_idを使用（全件混在を防ぐ）
         if not scan_id:
             scan_id = get_latest_scan_id()
         if scan_id:
