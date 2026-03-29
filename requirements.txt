@@ -4,3 +4,4 @@ yfinance
 xlrd
 openpyxl
 libsql-experimental
+curl_cffi
