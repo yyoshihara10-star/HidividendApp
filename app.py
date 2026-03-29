@@ -1,12 +1,16 @@
 import streamlit as st
 import pandas as pd
-import sqlite3
 import subprocess
 import sys
 import os
 import signal
 import time
 from datetime import datetime
+
+try:
+    import libsql_experimental as db_lib
+except ImportError:
+    import sqlite3 as db_lib
 
 st.set_page_config(page_title="プライム高配当株スクリーニング", layout="wide")
 st.title("高配当株スクリーニング (プライム全業種・全銘柄総当たり版)")
@@ -25,10 +29,31 @@ st.caption(
 DB_PATH     = "results.db"
 WORKER_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "worker.py")
 
+def get_db_conn():
+    """st.secrets にTursoの認証情報があればリモートDBに接続する"""
+    db_url = os.environ.get("TURSO_DATABASE_URL")
+    auth_token = os.environ.get("TURSO_AUTH_TOKEN")
+    
+    # st.secretsが存在しないローカル環境でもエラーで落ちないように保護
+    try:
+        if not db_url and "TURSO_DATABASE_URL" in st.secrets:
+            db_url = st.secrets["TURSO_DATABASE_URL"]
+        if not auth_token and "TURSO_AUTH_TOKEN" in st.secrets:
+            auth_token = st.secrets["TURSO_AUTH_TOKEN"]
+    except Exception:
+        pass
+    
+    if db_url and auth_token:
+        return db_lib.connect(db_url, auth_token=auth_token)
+    else:
+        return db_lib.connect(DB_PATH)
+
 def get_status():
     try:
-        conn = sqlite3.connect(DB_PATH)
-        rows = conn.execute("SELECT key, value FROM scan_status").fetchall()
+        conn = get_db_conn()
+        c = conn.cursor()
+        c.execute("SELECT key, value FROM scan_status")
+        rows = c.fetchall()
         conn.close()
         return dict(rows)
     except:
@@ -36,12 +61,16 @@ def get_status():
 
 def get_history():
     try:
-        conn = sqlite3.connect(DB_PATH)
-        df = pd.read_sql("""
+        conn = get_db_conn()
+        c = conn.cursor()
+        c.execute("""
             SELECT scan_id, started_at, finished_at, result_count, status
             FROM scan_history
             ORDER BY started_at DESC
-        """, conn)
+        """)
+        rows = c.fetchall()
+        # pd.read_sql の代わりに手動でDataFrame化 (Turso互換性対策)
+        df = pd.DataFrame(rows, columns=["scan_id", "started_at", "finished_at", "result_count", "status"])
         conn.close()
         return df
     except:
@@ -49,14 +78,16 @@ def get_history():
 
 def get_past_scan_ids():
     try:
-        conn = sqlite3.connect(DB_PATH)
-        rows = conn.execute("""
+        conn = get_db_conn()
+        c = conn.cursor()
+        c.execute("""
             SELECT DISTINCT scan_id, MIN(scanned_at) as started_at, COUNT(*) as cnt
             FROM scan_results
             WHERE scan_id IS NOT NULL
             GROUP BY scan_id
             ORDER BY started_at DESC
-        """).fetchall()
+        """)
+        rows = c.fetchall()
         conn.close()
         return rows
     except:
@@ -64,12 +95,14 @@ def get_past_scan_ids():
 
 def get_latest_scan_id():
     try:
-        conn = sqlite3.connect(DB_PATH)
-        row = conn.execute("""
+        conn = get_db_conn()
+        c = conn.cursor()
+        c.execute("""
             SELECT scan_id FROM scan_results
             WHERE scan_id IS NOT NULL
             ORDER BY scanned_at DESC LIMIT 1
-        """).fetchone()
+        """)
+        row = c.fetchone()
         conn.close()
         return row[0] if row else None
     except:
@@ -77,28 +110,27 @@ def get_latest_scan_id():
 
 def get_results(scan_id=None):
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = get_db_conn()
         if not scan_id:
             scan_id = get_latest_scan_id()
         if scan_id:
-            df = pd.read_sql("""
+            c = conn.cursor()
+            c.execute("""
                 SELECT
-                    industry     AS 業種,
-                    code         AS コード,
-                    name         AS 銘柄名,
-                    yield_pct    AS '利回り(%)',
-                    payout_pct   AS '配当性向(%)',
-                    equity_pct   AS '自己資本(%)',
-                    mcap_oku     AS '時価総額(億)',
-                    judge        AS 判定,
-                    stars        AS おすすめ度,
-                    note         AS 備考,
-                    score,
-                    scanned_at   AS スキャン日時
+                    industry, code, name, yield_pct, payout_pct,
+                    equity_pct, mcap_oku, judge, stars, note,
+                    score, scanned_at
                 FROM scan_results
                 WHERE scan_id = ?
                 ORDER BY score DESC, mcap_oku DESC
-            """, conn, params=(scan_id,))
+            """, (scan_id,))
+            rows = c.fetchall()
+            # pd.read_sql の代わりに手動でDataFrame化 (Turso互換性対策)
+            df = pd.DataFrame(rows, columns=[
+                "業種", "コード", "銘柄名", "利回り(%)", "配当性向(%)",
+                "自己資本(%)", "時価総額(億)", "判定", "おすすめ度", "備考",
+                "score", "スキャン日時"
+            ])
         else:
             df = pd.DataFrame()
         conn.close()
@@ -108,9 +140,10 @@ def get_results(scan_id=None):
 
 def delete_scan(scan_id):
     try:
-        conn = sqlite3.connect(DB_PATH)
-        conn.execute("DELETE FROM scan_results WHERE scan_id = ?", (scan_id,))
-        conn.execute("DELETE FROM scan_history WHERE scan_id = ?", (scan_id,))
+        conn = get_db_conn()
+        c = conn.cursor()
+        c.execute("DELETE FROM scan_results WHERE scan_id = ?", (scan_id,))
+        c.execute("DELETE FROM scan_history WHERE scan_id = ?", (scan_id,))
         conn.commit()
         conn.close()
     except:
@@ -118,8 +151,9 @@ def delete_scan(scan_id):
 
 def clear_status():
     try:
-        conn = sqlite3.connect(DB_PATH)
-        conn.execute("DELETE FROM scan_status")
+        conn = get_db_conn()
+        c = conn.cursor()
+        c.execute("DELETE FROM scan_status")
         conn.commit()
         conn.close()
     except:
@@ -131,11 +165,23 @@ def start_worker():
             return False, "worker.py が見つかりません: " + WORKER_PATH
         os.makedirs("logs", exist_ok=True)
         log = open("worker.log", "w", encoding="utf-8")
+        
+        env = os.environ.copy()
+        # 例外処理を追加してより安全に環境変数を設定
+        try:
+            if "TURSO_DATABASE_URL" in st.secrets:
+                env["TURSO_DATABASE_URL"] = st.secrets["TURSO_DATABASE_URL"]
+            if "TURSO_AUTH_TOKEN" in st.secrets:
+                env["TURSO_AUTH_TOKEN"] = st.secrets["TURSO_AUTH_TOKEN"]
+        except Exception:
+            pass
+            
         proc = subprocess.Popen(
             [sys.executable, WORKER_PATH],
             stdout=log,
             stderr=subprocess.STDOUT,
-            start_new_session=True
+            start_new_session=True,
+            env=env
         )
         return True, proc.pid
     except Exception as e:
