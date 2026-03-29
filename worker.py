@@ -1,6 +1,8 @@
 import pandas as pd
 import yfinance as yf
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 import time
 import random
 import os
@@ -22,6 +24,34 @@ DB_PATH    = "results.db"
 
 JST = timezone(timedelta(hours=9))
 
+# 様々なOS・ブラウザの身分証（これらをランダムに切り替えてアクセス制限を回避）
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:123.0) Gecko/20100101 Firefox/123.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.3 Safari/605.1.15",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Edge/122.0.0.0 Safari/537.36"
+]
+
+def get_robust_session():
+    """ブロックを回避するための強固な通信セッションを生成"""
+    session = requests.Session()
+    # 429(Too Many Requests)等のエラー時に自動で再接続を試みる設定
+    retry = Retry(
+        total=5,
+        backoff_factor=1.0,
+        status_forcelist=[429, 500, 502, 503, 504],
+    )
+    adapter = HTTPAdapter(max_retries=retry)
+    session.mount('http://', adapter)
+    session.mount('https://', adapter)
+    session.headers.update({
+        "User-Agent": random.choice(USER_AGENTS),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "ja,en-US;q=0.9,en;q=0.8",
+    })
+    return session
+
 def now_jst():
     return datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S")
 
@@ -29,7 +59,6 @@ def now_jst_id():
     return datetime.now(JST).strftime("%Y%m%d_%H%M%S")
 
 def get_db_conn():
-    """Tursoの環境変数があればリモートDBに、なければローカルのSQLiteに接続する"""
     db_url = os.environ.get("TURSO_DATABASE_URL")
     auth_token = os.environ.get("TURSO_AUTH_TOKEN")
     
@@ -214,12 +243,6 @@ def check_dividend_history(ticker):
         return 0, 0, False, "配当履歴取得失敗"
 
 def get_payout_ratio(info, ticker):
-    """
-    配当性向を自力計算する。
-    yfinanceのpayoutRatioは使用しない。
-    予想EPS(forwardEps)を優先し、無い場合は実績EPS(trailingEps)を使用。
-    EPSがマイナスまたは取得不可の場合は0を返す。
-    """
     f_eps = info.get("forwardEps")
     t_eps = info.get("trailingEps")
 
@@ -268,10 +291,6 @@ def check_payout_recovery(info):
     return False, ""
 
 def get_equity_ratio(info, ticker, is_finance):
-    """
-    貸借対照表から自己資本と総資産を直接取得して計算する。
-    debtToEquityは有利子負債のみで無利子負債が抜け落ちるため使用しない。
-    """
     try:
         bs = ticker.balance_sheet
         if bs is not None and not bs.empty:
@@ -304,16 +323,11 @@ def get_equity_ratio(info, ticker, is_finance):
     return 0.0
 
 def fetch_info_retry(symbol):
-    # Yahooファイナンスのブロックを回避するためのブラウザ偽装セッション
-    session = requests.Session()
-    session.headers.update({
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    })
+    session = get_robust_session()
 
     for attempt in range(MAX_RETRY):
         try:
-            time.sleep(INFO_WAIT + random.uniform(0, 0.5))
-            # セッションを指定してTickerを生成
+            time.sleep(INFO_WAIT + random.uniform(0.5, 1.5))
             ticker = yf.Ticker(symbol, session=session)
             info   = ticker.info
             if not info or len(info) < 5:
@@ -325,6 +339,8 @@ def fetch_info_retry(symbol):
                 wait = (2 ** attempt) * 10
                 print("rate limit " + symbol + " wait " + str(wait) + "s")
                 time.sleep(wait)
+                # エラーが出たら別のブラウザ(UA)に変装して再トライ
+                session = get_robust_session()
             else:
                 print("error " + symbol + " " + msg[:60])
                 return None, None
@@ -400,7 +416,6 @@ def analyze(symbol, industry, forced=False):
     elif t_eps:
         reasons.append("EPS:" + str(round(t_eps, 1)) + "円(予想データなし)")
 
-    # 配当性向（計算できない場合は除外）
     payout = get_payout_ratio(info, ticker)
     if payout == 0:
         print("    reason: payout cannot be calculated")
