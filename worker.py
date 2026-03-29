@@ -1,5 +1,6 @@
 import pandas as pd
 import yfinance as yf
+import requests
 import time
 import random
 import os
@@ -84,7 +85,6 @@ def init_db():
 def set_status(key, value):
     conn = get_db_conn()
     c = conn.cursor()
-    # executeを直接叩かず明示的にcursorを使う
     c.execute("INSERT OR REPLACE INTO scan_status VALUES (?, ?)", (key, str(value)))
     conn.commit()
     conn.close()
@@ -304,10 +304,17 @@ def get_equity_ratio(info, ticker, is_finance):
     return 0.0
 
 def fetch_info_retry(symbol):
+    # Yahooファイナンスのブロックを回避するためのブラウザ偽装セッション
+    session = requests.Session()
+    session.headers.update({
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    })
+
     for attempt in range(MAX_RETRY):
         try:
             time.sleep(INFO_WAIT + random.uniform(0, 0.5))
-            ticker = yf.Ticker(symbol)
+            # セッションを指定してTickerを生成
+            ticker = yf.Ticker(symbol, session=session)
             info   = ticker.info
             if not info or len(info) < 5:
                 return None, None
