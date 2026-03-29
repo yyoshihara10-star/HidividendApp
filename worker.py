@@ -1,11 +1,15 @@
 import pandas as pd
 import yfinance as yf
-import sqlite3
 import time
 import random
 import os
 import sys
 from datetime import datetime, timezone, timedelta
+
+try:
+    import libsql_experimental as db_lib
+except ImportError:
+    import sqlite3 as db_lib
 
 sys.stdout.reconfigure(line_buffering=True)
 
@@ -23,8 +27,18 @@ def now_jst():
 def now_jst_id():
     return datetime.now(JST).strftime("%Y%m%d_%H%M%S")
 
+def get_db_conn():
+    """Tursoの環境変数があればリモートDBに、なければローカルのSQLiteに接続する"""
+    db_url = os.environ.get("TURSO_DATABASE_URL")
+    auth_token = os.environ.get("TURSO_AUTH_TOKEN")
+    
+    if db_url and auth_token:
+        return db_lib.connect(db_url, auth_token=auth_token)
+    else:
+        return db_lib.connect(DB_PATH)
+
 def init_db():
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_conn()
     c = conn.cursor()
     c.execute("""
         CREATE TABLE IF NOT EXISTS scan_results (
@@ -68,17 +82,20 @@ def init_db():
     conn.close()
 
 def set_status(key, value):
-    conn = sqlite3.connect(DB_PATH)
-    conn.execute("INSERT OR REPLACE INTO scan_status VALUES (?, ?)", (key, str(value)))
+    conn = get_db_conn()
+    c = conn.cursor()
+    # executeを直接叩かず明示的にcursorを使う
+    c.execute("INSERT OR REPLACE INTO scan_status VALUES (?, ?)", (key, str(value)))
     conn.commit()
     conn.close()
 
 def save_results(rows, scan_id):
     if not rows:
         return
-    conn = sqlite3.connect(DB_PATH)
-    conn.execute("DELETE FROM scan_results WHERE scan_id = ?", (scan_id,))
-    conn.executemany("""
+    conn = get_db_conn()
+    c = conn.cursor()
+    c.execute("DELETE FROM scan_results WHERE scan_id = ?", (scan_id,))
+    c.executemany("""
         INSERT INTO scan_results
         (scan_id, scanned_at, industry, code, name, yield_pct, payout_pct,
          equity_pct, mcap_oku, judge, stars, note, score)
@@ -88,8 +105,9 @@ def save_results(rows, scan_id):
     conn.close()
 
 def update_history(scan_id, started_at, finished_at, count, status):
-    conn = sqlite3.connect(DB_PATH)
-    conn.execute("""
+    conn = get_db_conn()
+    c = conn.cursor()
+    c.execute("""
         INSERT OR REPLACE INTO scan_history
         (scan_id, started_at, finished_at, result_count, status)
         VALUES (?,?,?,?,?)
