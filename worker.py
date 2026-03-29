@@ -1,6 +1,8 @@
 import pandas as pd
 import yfinance as yf
-from curl_cffi import requests  # ★通常のrequestsではなく、指紋偽装が可能なcurl_cffiを使用
+import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 import time
 import random
 import os
@@ -22,15 +24,26 @@ DB_PATH    = "results.db"
 
 JST = timezone(timedelta(hours=9))
 
+# 様々なブラウザの身分証（ランダムに切り替えて不審なアクセスと見なされるのを防ぐ）
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:123.0) Gecko/20100101 Firefox/123.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.3 Safari/605.1.15"
+]
+
 def get_robust_session():
-    """
-    Yahooの最新Bot対策を突破するための強力なセッションを生成。
-    impersonateパラメータを使うことで、TLSフィンガープリント(通信の指紋)まで
-    完全に本物のブラウザとして偽装します。
-    """
-    browsers = ["chrome", "safari", "edge"]
-    # ランダムなブラウザに完全になりすます
-    session = requests.Session(impersonate=random.choice(browsers))
+    """標準機能で最も安全かつ安定した通信セッションを作る"""
+    session = requests.Session()
+    retry = Retry(total=3, backoff_factor=1.0, status_forcelist=[500, 502, 503, 504])
+    adapter = HTTPAdapter(max_retries=retry)
+    session.mount('http://', adapter)
+    session.mount('https://', adapter)
+    session.headers.update({
+        "User-Agent": random.choice(USER_AGENTS),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "ja,en-US;q=0.9,en;q=0.8"
+    })
     return session
 
 def now_jst():
@@ -72,7 +85,6 @@ def init_db():
     existing = [row[1] for row in c.execute("PRAGMA table_info(scan_results)").fetchall()]
     if "scan_id" not in existing:
         c.execute("ALTER TABLE scan_results ADD COLUMN scan_id TEXT")
-        print("migrated: added scan_id column")
 
     c.execute("""
         CREATE TABLE IF NOT EXISTS scan_status (
@@ -151,7 +163,6 @@ def get_sector_targets(sector_df, col_map):
     if "size_code" in col_map and col_map["size_code"] in df.columns:
         df["_sort"] = pd.to_numeric(df[col_map["size_code"]], errors="coerce").fillna(99)
         df = df.sort_values("_sort")
-        print("  sorted by size_code")
         return df.head(30)
 
     if "size" in col_map and col_map["size"] in df.columns:
@@ -169,7 +180,6 @@ def get_sector_targets(sector_df, col_map):
         df = df.sort_values("_sort")
         return df.head(30)
 
-    print("  no size info, using head 30")
     return df.head(30)
 
 def check_dividend_history(ticker):
@@ -320,7 +330,7 @@ def fetch_info_retry(symbol):
                 wait = (2 ** attempt) * 10
                 print("rate limit " + symbol + " wait " + str(wait) + "s")
                 time.sleep(wait)
-                # エラーが出たら別のブラウザに変装して再トライ
+                # エラー時はセッションをリセットして別のブラウザに切り替え
                 session = get_robust_session()
             else:
                 print("error " + symbol + " " + msg[:60])
@@ -391,9 +401,7 @@ def analyze(symbol, industry, forced=False):
     if t_eps and f_eps and t_eps != 0:
         eps_growth = round((f_eps - t_eps) / abs(t_eps) * 100, 1)
         prefix = "+" if eps_growth >= 0 else ""
-        reasons.append(
-            "EPS:" + str(round(t_eps, 1)) + "->" + str(round(f_eps, 1)) + "円(" + prefix + str(eps_growth) + "%)"
-        )
+        reasons.append("EPS:" + str(round(t_eps, 1)) + "->" + str(round(f_eps, 1)) + "円(" + prefix + str(eps_growth) + "%)")
     elif t_eps:
         reasons.append("EPS:" + str(round(t_eps, 1)) + "円(予想データなし)")
 
