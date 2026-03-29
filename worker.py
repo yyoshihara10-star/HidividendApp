@@ -1,8 +1,6 @@
 import pandas as pd
 import yfinance as yf
-import requests
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
+from curl_cffi import requests  # ★通常のrequestsではなく、指紋偽装が可能なcurl_cffiを使用
 import time
 import random
 import os
@@ -24,32 +22,15 @@ DB_PATH    = "results.db"
 
 JST = timezone(timedelta(hours=9))
 
-# 様々なOS・ブラウザの身分証（これらをランダムに切り替えてアクセス制限を回避）
-USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:123.0) Gecko/20100101 Firefox/123.0",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.3 Safari/605.1.15",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Edge/122.0.0.0 Safari/537.36"
-]
-
 def get_robust_session():
-    """ブロックを回避するための強固な通信セッションを生成"""
-    session = requests.Session()
-    # 429(Too Many Requests)等のエラー時に自動で再接続を試みる設定
-    retry = Retry(
-        total=5,
-        backoff_factor=1.0,
-        status_forcelist=[429, 500, 502, 503, 504],
-    )
-    adapter = HTTPAdapter(max_retries=retry)
-    session.mount('http://', adapter)
-    session.mount('https://', adapter)
-    session.headers.update({
-        "User-Agent": random.choice(USER_AGENTS),
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "ja,en-US;q=0.9,en;q=0.8",
-    })
+    """
+    Yahooの最新Bot対策を突破するための強力なセッションを生成。
+    impersonateパラメータを使うことで、TLSフィンガープリント(通信の指紋)まで
+    完全に本物のブラウザとして偽装します。
+    """
+    browsers = ["chrome", "safari", "edge"]
+    # ランダムなブラウザに完全になりすます
+    session = requests.Session(impersonate=random.choice(browsers))
     return session
 
 def now_jst():
@@ -339,7 +320,7 @@ def fetch_info_retry(symbol):
                 wait = (2 ** attempt) * 10
                 print("rate limit " + symbol + " wait " + str(wait) + "s")
                 time.sleep(wait)
-                # エラーが出たら別のブラウザ(UA)に変装して再トライ
+                # エラーが出たら別のブラウザに変装して再トライ
                 session = get_robust_session()
             else:
                 print("error " + symbol + " " + msg[:60])
