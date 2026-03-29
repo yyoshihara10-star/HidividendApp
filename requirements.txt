@@ -3,3 +3,4 @@ pandas
 yfinance
 xlrd
 openpyxl
+libsql-experimental
