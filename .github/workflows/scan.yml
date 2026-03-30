@@ -2,12 +2,7 @@ name: Auto Scan High Dividend Stocks
 
 on:
   schedule:
-    # 変更前（毎日）
-    # - cron: '0 18 * * *'
-    
-    # 変更後（毎週 金曜18:00 UTC ＝ 土曜03:00 JST）
     - cron: '0 18 * * 5'
-  # 手動で「今すぐ実行」ボタンを押せるようにする設定
   workflow_dispatch:
 
 jobs:
@@ -26,7 +21,7 @@ jobs:
       - name: 必要なライブラリのインストール
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          pip install pandas yfinance>=0.2.37 curl_cffi xlrd openpyxl libsql-experimental
 
       - name: スキャン(worker.py)の実行
         env:
