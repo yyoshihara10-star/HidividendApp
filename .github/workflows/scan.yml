@@ -1,7 +1,7 @@
 name: Auto Scan High Dividend Stocks
 
 on:
-schedule:
+  schedule:
     # 変更前（毎日）
     # - cron: '0 18 * * *'
     
