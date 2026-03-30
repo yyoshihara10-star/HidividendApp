@@ -1,8 +1,6 @@
 import pandas as pd
 import yfinance as yf
-import requests
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
+from curl_cffi import requests
 import time
 import random
 import os
@@ -19,31 +17,14 @@ sys.stdout.reconfigure(line_buffering=True)
 SOGO_SHOSHA_CODES = {8058, 8031, 8001, 8053, 8002, 8015, 2768}
 MIN_YIELD  = 3.0
 INFO_WAIT  = 1.0
-MAX_RETRY  = 3
+MAX_RETRY  = 4  # リトライ回数を少し増やして粘り強くしました
 DB_PATH    = "results.db"
 
 JST = timezone(timedelta(hours=9))
 
-# 様々なブラウザの身分証（ランダムに切り替えて不審なアクセスと見なされるのを防ぐ）
-USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:123.0) Gecko/20100101 Firefox/123.0",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.3 Safari/605.1.15"
-]
-
 def get_robust_session():
-    """標準機能で最も安全かつ安定した通信セッションを作る"""
-    session = requests.Session()
-    retry = Retry(total=3, backoff_factor=1.0, status_forcelist=[500, 502, 503, 504])
-    adapter = HTTPAdapter(max_retries=retry)
-    session.mount('http://', adapter)
-    session.mount('https://', adapter)
-    session.headers.update({
-        "User-Agent": random.choice(USER_AGENTS),
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "ja,en-US;q=0.9,en;q=0.8"
-    })
+    browsers = ["chrome", "safari", "edge"]
+    session = requests.Session(impersonate=random.choice(browsers))
     return session
 
 def now_jst():
@@ -321,19 +302,23 @@ def fetch_info_retry(symbol):
             time.sleep(INFO_WAIT + random.uniform(0.5, 1.5))
             ticker = yf.Ticker(symbol, session=session)
             info   = ticker.info
+            
+            # データが空っぽの場合も、エラーとして投げてリトライさせる
             if not info or len(info) < 5:
-                return None, None
+                raise ValueError("info is empty")
+                
             return info, ticker
         except Exception as e:
             msg = str(e)
-            if "429" in msg or "Too Many" in msg:
-                wait = (2 ** attempt) * 10
-                print("rate limit " + symbol + " wait " + str(wait) + "s")
+            # 429(制限)だけでなく、401(Crumbエラー)や空データの場合も粘り強くリトライする
+            if "429" in msg or "Too Many" in msg or "401" in msg or "Crumb" in msg or "info is empty" in msg:
+                wait = (2 ** attempt) * 5
+                print(f"retry {symbol} wait {wait}s (reason: {msg[:30]})")
                 time.sleep(wait)
-                # エラー時はセッションをリセットして別のブラウザに切り替え
+                # エラー時はセッション（ブラウザ）を新しいものにリセットして再突撃
                 session = get_robust_session()
             else:
-                print("error " + symbol + " " + msg[:60])
+                print(f"error {symbol} {msg[:60]}")
                 return None, None
     return None, None
 
@@ -485,31 +470,18 @@ def main():
 
     try:
         df, col_map = fetch_jpx_prime()
-        print("JPX columns: " + str(list(df.columns)))
-        print("col_map: " + str(col_map))
-        print("JPX rows: " + str(len(df)))
     except Exception as e:
-        print("JPX fetch error: " + str(e))
         set_status("state",   "done")
-        set_status("current", "JPXデータ取得エラー")
         update_history(scan_id, started_at, now_jst(), 0, "error")
         return
 
     missing = [k for k in ["market", "industry", "code", "name"] if k not in col_map]
     if missing:
-        print("missing columns: " + str(missing))
         set_status("state",   "done")
-        set_status("current", "列が見つかりません: " + str(missing))
         update_history(scan_id, started_at, now_jst(), 0, "error")
         return
 
     jpx_df = df[df[col_map["market"]].astype(str).str.contains("プライム")].copy()
-    print("prime rows: " + str(len(jpx_df)))
-
-    if "size" in col_map:
-        print("size sample: " + str(jpx_df[col_map["size"]].dropna().unique().tolist()[:10]))
-    if "size_code" in col_map:
-        print("size_code sample: " + str(jpx_df[col_map["size_code"]].dropna().unique().tolist()[:10]))
 
     jpx_df[col_map["code"]] = (
         jpx_df[col_map["code"]]
@@ -523,12 +495,8 @@ def main():
     non_shosha_df  = jpx_df[~jpx_df[col_map["code"]].isin(SOGO_SHOSHA_CODES)]
     all_industries = sorted(non_shosha_df[col_map["industry"]].dropna().unique())
 
-    print("industries count: " + str(len(all_industries)))
-
     if len(all_industries) == 0:
-        print("ERROR: no industries found")
         set_status("state",   "done")
-        set_status("current", "業種データが取得できませんでした")
         update_history(scan_id, started_at, now_jst(), 0, "error")
         return
 
@@ -542,17 +510,16 @@ def main():
 
         sector_df = non_shosha_df[non_shosha_df[col_map["industry"]] == industry]
         targets   = get_sector_targets(sector_df, col_map)
-        print("  target: " + str(len(targets)) + " stocks")
 
         candidates = scan_sector(targets, industry, col_map, forced=False)
         if not candidates:
-            print("  -> forced mode")
             candidates = scan_sector(targets, industry, col_map, forced=True)
 
         if candidates:
-            top5 = sorted(candidates, key=lambda x: (x["score"], x["m_cap"]), reverse=True)[:5]
+            # ★ここで5件制限を解除し、条件をクリアした全銘柄を保存するようにしました！
+            passed_stocks = sorted(candidates, key=lambda x: (x["score"], x["m_cap"]), reverse=True)
             now  = now_jst()
-            for r in top5:
+            for r in passed_stocks:
                 all_results.append((
                     scan_id, now, r["industry"], r["code"], r["name"],
                     r["dy"], r["payout"], r["eq"], r["mcap"],
@@ -568,6 +535,7 @@ def main():
         shosha_cand = scan_sector(shosha_targets, "商社", col_map, forced=True)
     if shosha_cand:
         now = now_jst()
+        # ★商社も全件保存します
         for r in sorted(shosha_cand, key=lambda x: (x["score"], x["m_cap"]), reverse=True):
             all_results.append((
                 scan_id, now, r["industry"], r["code"], r["name"],
