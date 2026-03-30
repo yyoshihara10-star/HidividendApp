@@ -71,7 +71,8 @@ def get_scan_status():
         rows = c.fetchall()
         conn.close()
         return {k: v for k, v in rows}
-    except:
+    except Exception as e:
+        st.error(f"ステータス取得エラー: {e}")
         return {}
 
 def get_history():
@@ -87,7 +88,8 @@ def get_history():
         df = pd.DataFrame(rows, columns=["scan_id", "started_at", "finished_at", "result_count", "status"])
         conn.close()
         return df
-    except:
+    except Exception as e:
+        st.error(f"履歴取得エラー: {e}")
         return pd.DataFrame()
 
 def get_latest_scan_id():
@@ -131,7 +133,9 @@ def get_results(scan_id=None):
             df = pd.DataFrame()
         conn.close()
         return df
-    except:
+    # ★ エラーを握りつぶさず、画面に出すようにしました！
+    except Exception as e:
+        st.error(f"データベースから結果を取得中にエラーが発生しました: {e}")
         return pd.DataFrame()
 
 def delete_scan(scan_id):
@@ -142,8 +146,8 @@ def delete_scan(scan_id):
         c.execute("DELETE FROM scan_history WHERE scan_id = ?", (scan_id,))
         conn.commit()
         conn.close()
-    except:
-        pass
+    except Exception as e:
+        st.error(f"削除エラー: {e}")
 
 # セッション初期化
 if "selected_scan_id" not in st.session_state:
@@ -153,7 +157,6 @@ if "selected_scan_id" not in st.session_state:
 
 st.divider()
 
-# ★ボタンを3列に分けました
 col1, col2, col3 = st.columns([4, 3, 3])
 
 with col1:
@@ -161,6 +164,7 @@ with col1:
         with st.spinner("GitHubへスキャン開始の指示を送信中..."):
             success, msg = trigger_github_workflow()
             if success:
+                st.session_state["selected_scan_id"] = None # ★スキャン開始時は自動で「現在」に戻す
                 st.success(msg)
                 time.sleep(2)
                 st.rerun()
@@ -168,17 +172,23 @@ with col1:
                 st.error(msg)
 
 with col2:
-    if st.button("🔄 データを最新に更新", use_container_width=True):
-        st.cache_data.clear()
+    # ★このボタンを押すと、過去の選択が解除されて「現在（最新）」に戻ります！
+    if st.button("🔄 最新の状態に戻す / 更新", use_container_width=True):
+        st.session_state["selected_scan_id"] = None 
         st.rerun()
 
 with col3:
-    # ★GitHubのActions画面に直接飛べるリンクボタンを追加しました
     st.link_button(
         "📜 ライブログ (GitHub) を見る", 
         "https://github.com/yyoshihara10-star/HidividendApp/actions", 
         use_container_width=True
     )
+
+selected_scan_id = st.session_state["selected_scan_id"]
+
+# ★過去の履歴を見ている時は、わかりやすく警告を出すようにしました
+if selected_scan_id:
+    st.warning(f"🕒 現在、過去の履歴 ({selected_scan_id}) を表示しています。「最新の状態に戻す / 更新」ボタンで現在の状況に戻れます。")
 
 # 裏側の進捗状況をチェックして表示する
 status_data = get_scan_status()
@@ -190,7 +200,6 @@ if status_data.get("state") == "running":
 
 st.divider()
 
-selected_scan_id = st.session_state["selected_scan_id"]
 df = get_results(selected_scan_id)
 
 if df.empty:
