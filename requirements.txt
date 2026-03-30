@@ -1,6 +1,7 @@
 streamlit
 pandas
 yfinance>=0.2.37
+curl_cffi
 xlrd
 openpyxl
 libsql-experimental
