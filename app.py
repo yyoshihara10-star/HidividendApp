@@ -44,7 +44,7 @@ def get_db_conn():
         return db_lib.connect(DB_PATH)
 
 def trigger_github_workflow():
-    repo = "yyoshihara10/hidividendapp" 
+    repo = "yyoshihara10-star/HidividendApp" 
     url = f"https://api.github.com/repos/{repo}/actions/workflows/scan.yml/dispatches"
     
     try:
