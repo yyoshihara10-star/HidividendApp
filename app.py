@@ -3,6 +3,7 @@ import pandas as pd
 import requests
 import os
 from datetime import datetime
+import time
 
 try:
     import libsql_experimental as db_lib
@@ -11,6 +12,17 @@ except ImportError:
 
 st.set_page_config(page_title="プライム高配当株スクリーニング", layout="wide")
 st.title("高配当株スクリーニング")
+
+# ★抽出条件のテキストを復活させました！
+st.markdown("""
+**【現在のスクリーニング条件】**
+* **市場**: 東証プライム市場
+* **配当利回り**: 3.0% 以上
+* **配当履歴**: 過去10年で減配1回以内（2回以上は増配傾向のみ許容）
+* **配当性向**: 30% 〜 70%（70%超は業績回復見込みのみ許容）
+* **自己資本比率**: 40% 以上（金融系を除く）
+* **業績**: 直近の売上・利益がマイナス成長でないこと
+""")
 st.caption("※スキャンはGitHubのサーバーで安全に実行され、結果がここに表示されます。")
 
 DB_PATH = "results.db"
@@ -32,8 +44,6 @@ def get_db_conn():
         return db_lib.connect(DB_PATH)
 
 def trigger_github_workflow():
-    """GitHub Actionsを遠隔で起動するリモコン機能"""
-    # ログから推測したあなたのリポジトリ名です（もし違っていたら書き換えてください）
     repo = "yyoshihara10/hidividendapp" 
     url = f"https://api.github.com/repos/{repo}/actions/workflows/scan.yml/dispatches"
     
@@ -53,6 +63,18 @@ def trigger_github_workflow():
         return True, "スキャンの指示を送信しました！"
     else:
         return False, f"エラーが発生しました: {res.text}"
+
+def get_scan_status():
+    """データベースから現在のスキャン進捗状況を取得する"""
+    try:
+        conn = get_db_conn()
+        c = conn.cursor()
+        c.execute("SELECT key, value FROM scan_status")
+        rows = c.fetchall()
+        conn.close()
+        return {k: v for k, v in rows}
+    except:
+        return {}
 
 def get_history():
     try:
@@ -139,13 +161,24 @@ with col1:
         with st.spinner("GitHubへスキャン開始の指示を送信中..."):
             success, msg = trigger_github_workflow()
             if success:
-                st.success(f"{msg} (裏側でスキャンが始まりました。約10〜20分後に右の更新ボタンを押して確認してください)")
+                st.success(msg)
+                time.sleep(2)
+                st.rerun()
             else:
                 st.error(msg)
+
 with col2:
     if st.button("🔄 データを最新に更新", use_container_width=True):
         st.cache_data.clear()
         st.rerun()
+
+# ★裏側の進捗状況をチェックして表示する
+status_data = get_scan_status()
+if status_data.get("state") == "running":
+    progress = int(status_data.get("progress", 0))
+    current_task = status_data.get("current", "準備中...")
+    st.info("⏳ **現在クラウドでスキャンを実行中です**")
+    st.progress(progress / 100.0, text=f"進捗: {progress}% - 現在の処理: {current_task}")
 
 st.divider()
 
