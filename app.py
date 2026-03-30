@@ -13,7 +13,6 @@ except ImportError:
 st.set_page_config(page_title="プライム高配当株スクリーニング", layout="wide")
 st.title("高配当株スクリーニング")
 
-# ★抽出条件のテキストを復活させました！
 st.markdown("""
 **【現在のスクリーニング条件】**
 * **市場**: 東証プライム市場
@@ -65,7 +64,6 @@ def trigger_github_workflow():
         return False, f"エラーが発生しました: {res.text}"
 
 def get_scan_status():
-    """データベースから現在のスキャン進捗状況を取得する"""
     try:
         conn = get_db_conn()
         c = conn.cursor()
@@ -155,7 +153,9 @@ if "selected_scan_id" not in st.session_state:
 
 st.divider()
 
-col1, col2 = st.columns([1, 1])
+# ★ボタンを3列に分けました
+col1, col2, col3 = st.columns([4, 3, 3])
+
 with col1:
     if st.button("▶️ スキャンを手動で開始 (クラウド実行)", type="primary", use_container_width=True):
         with st.spinner("GitHubへスキャン開始の指示を送信中..."):
@@ -172,7 +172,15 @@ with col2:
         st.cache_data.clear()
         st.rerun()
 
-# ★裏側の進捗状況をチェックして表示する
+with col3:
+    # ★GitHubのActions画面に直接飛べるリンクボタンを追加しました
+    st.link_button(
+        "📜 ライブログ (GitHub) を見る", 
+        "https://github.com/yyoshihara10-star/HidividendApp/actions", 
+        use_container_width=True
+    )
+
+# 裏側の進捗状況をチェックして表示する
 status_data = get_scan_status()
 if status_data.get("state") == "running":
     progress = int(status_data.get("progress", 0))
