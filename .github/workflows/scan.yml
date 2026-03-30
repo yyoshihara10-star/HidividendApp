@@ -1,10 +1,12 @@
 name: Auto Scan High Dividend Stocks
 
 on:
-  # 毎日 深夜3時00分(日本時間) に自動実行する設定 (UTCで指定するため18時としています)
-  schedule:
-    - cron: '0 18 * * *'
-  
+schedule:
+    # 変更前（毎日）
+    # - cron: '0 18 * * *'
+    
+    # 変更後（毎週 金曜18:00 UTC ＝ 土曜03:00 JST）
+    - cron: '0 18 * * 5'
   # 手動で「今すぐ実行」ボタンを押せるようにする設定
   workflow_dispatch:
 
