@@ -265,12 +265,46 @@ else:
     if "商社" in industries:
         industries = ["商社"] + [i for i in industries if i != "商社"]
 
-    tabs = st.tabs(["全件"] + industries)
+    # おすすめタブ用データ（score>=4 かつ 利回り>=3.5%、優待あり優先）
+    osusume_src = filtered_df[
+        (filtered_df["score"] >= 4) &
+        (filtered_df["利回り(%)"] >= 3.5)
+    ].copy()
+
+    def _yutai_rank(v):
+        if not isinstance(v, str) or v in ("-", ""):
+            return 0
+        if v == "なし":
+            return 1
+        return 2
+
+    osusume_src["_yr"] = osusume_src["株主優待"].apply(_yutai_rank)
+    osusume_sorted = osusume_src.sort_values(
+        ["利回り(%)", "score", "_yr"], ascending=[False, False, False]
+    )
+    osusume_disp = osusume_sorted.drop(columns=["score", "スキャン日時", "_yr"], errors="ignore")
+    osusume_starred = add_star_to_best(osusume_sorted, osusume_disp)
+
+    def highlight_osusume(row):
+        if row["利回り(%)"] < 3.0:
+            return ["background-color: #e0e0e0; color: #888888"] * len(row)
+        sv = osusume_sorted.loc[osusume_sorted["コード"] == row["コード"], "score"].values
+        if len(sv) > 0 and sv[0] == 5 and row["利回り(%)"] >= 3.5:
+            return ["background-color: #fff9c4; font-weight: bold"] * len(row)
+        return [""] * len(row)
+
+    tabs = st.tabs(["おすすめ", "全件"] + industries)
 
     with tabs[0]:
+        if osusume_starred.empty:
+            st.info("おすすめ条件（利回り3.5%以上・おすすめ度★★★★以上）に該当する銘柄はありません。")
+        else:
+            st.dataframe(osusume_starred.style.apply(highlight_osusume, axis=1), use_container_width=True)
+
+    with tabs[1]:
         st.dataframe(starred_df.style.apply(highlight_best, axis=1), use_container_width=True)
 
-    for tab, ind in zip(tabs[1:], industries):
+    for tab, ind in zip(tabs[2:], industries):
         with tab:
             ind_df = starred_df[starred_df["業種"] == ind].reset_index(drop=True)
             def highlight_ind(row, i=ind):

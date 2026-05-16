@@ -354,53 +354,111 @@ def get_dividend_yield(info, ticker, price):
         pass
     return 0.0
 
+def _parse_yutai_html(html):
+    """HTML から (shares_text, month_text) を抽出"""
+    soup = BeautifulSoup(html, "html.parser")
+    month_text = ""
+    shares_text = ""
+
+    # th→td / dt→dd の両方を試す
+    for label_tag, value_tag in [("th", "td"), ("dt", "dd")]:
+        for label in soup.find_all(label_tag):
+            txt = label.get_text(strip=True)
+            # 値要素: 同行の兄弟 or 次行の td
+            val_el = label.find_next_sibling(value_tag)
+            if val_el is None:
+                parent = label.parent
+                next_row = parent.find_next_sibling("tr") if parent else None
+                if next_row:
+                    val_el = next_row.find(value_tag)
+            if val_el is None:
+                continue
+            val = val_el.get_text(" ", strip=True)
+
+            if any(k in txt for k in ["権利確定", "権利月", "確定月"]):
+                months = re.findall(r'\d+月', val)
+                if months:
+                    month_text = "・".join(dict.fromkeys(months))
+
+            if not shares_text and any(k in txt for k in ["最低", "単元", "株数", "必要株"]):
+                nums = re.findall(r'[\d,]+', val)
+                if nums:
+                    n = int(nums[0].replace(",", ""))
+                    if 1 <= n <= 1000000:
+                        shares_text = f"{n}株以上"
+
+    # regex フォールバック（HTMLテキスト全体）
+    if not month_text:
+        m = re.search(r'権利確定月[^月\d]{0,20}(\d+)月', html)
+        if m:
+            month_text = m.group(1) + "月"
+
+    if not shares_text:
+        # "100株以上" "100株から" "1単元(100株)" など
+        m = re.search(r'(\d[\d,]*)\s*株(?:以上|から|～)', html)
+        if not m:
+            m = re.search(r'1単元[（(](\d[\d,]*)株[）)]', html)
+        if m:
+            n = int(m.group(1).replace(",", ""))
+            if 1 <= n <= 1000000:
+                shares_text = f"{n}株以上"
+
+    return shares_text, month_text
+
+
 def get_yutai(code4):
-    """株主優待情報をkabutan.jpから取得。例: '100株以上 / 3月・9月'"""
-    try:
-        session = get_robust_session()
-        time.sleep(0.5 + random.uniform(0, 0.5))
-        url = f"https://kabutan.jp/stock/yutai?code={code4}"
-        resp = session.get(url, timeout=10)
-        if resp.status_code != 200:
-            return "-"
-        html = resp.text
-        no_yutai_markers = [
-            "株主優待はありません", "優待情報がありません",
-            "株主優待制度はありません", "優待なし", "設定されていません"
-        ]
-        if any(m in html for m in no_yutai_markers):
+    """株主優待情報を取得。kabutan.jp → minkabu.jp の順で試みる"""
+    NO_YUTAI = [
+        "株主優待は実施していません",
+        "株主優待制度はございません",
+        "株主優待制度はありません",
+        "株主優待はありません",
+        "株主優待情報はありません",
+        "この企業には株主優待の情報がありません",
+    ]
+    urls = [
+        f"https://kabutan.jp/stock/yutai?code={code4}",
+        f"https://minkabu.jp/stock/{code4}/yutai",
+    ]
+    for url in urls:
+        try:
+            sess = get_robust_session()
+            time.sleep(0.8 + random.uniform(0.2, 0.6))
+            resp = sess.get(url, timeout=15)
+            print(f"    yutai {code4}: HTTP {resp.status_code} ({url})")
+            if resp.status_code != 200:
+                continue
+
+            html = resp.text
+
+            if any(m in html for m in NO_YUTAI):
+                return "なし"
+
+            shares_text, month_text = _parse_yutai_html(html)
+
+            if month_text or shares_text:
+                parts = []
+                if shares_text:
+                    parts.append(shares_text)
+                if month_text:
+                    parts.append(month_text)
+                result = " / ".join(parts)
+                print(f"    yutai {code4}: {result}")
+                return result
+
+            # ページ自体は取れたが詳細パース失敗
+            if "優待" in html and ("権利確定" in html or "権利月" in html):
+                print(f"    yutai {code4}: あり(詳細取得失敗)")
+                return "あり(詳細確認要)"
+
+            # 優待情報が全くない
             return "なし"
-        soup = BeautifulSoup(html, "html.parser")
-        month_text = ""
-        shares_text = ""
-        for table in soup.find_all("table"):
-            for row in table.find_all("tr"):
-                ths = row.find_all("th")
-                tds = row.find_all("td")
-                if not ths or not tds:
-                    continue
-                th = ths[0].get_text(strip=True)
-                td = tds[0].get_text(strip=True)
-                if "権利確定" in th or "権利月" in th:
-                    months = re.findall(r'\d+月', td)
-                    month_text = "・".join(months) if months else ""
-                elif ("最低" in th and "株" in th) or "単元株" in th:
-                    if not shares_text:
-                        nums = re.findall(r'[\d,]+', td)
-                        if nums:
-                            shares_text = nums[0].replace(",", "") + "株以上"
-        if month_text or shares_text:
-            parts = []
-            if shares_text:
-                parts.append(shares_text)
-            if month_text:
-                parts.append(month_text)
-            return " / ".join(parts)
-        if "優待" in html and "権利" in html:
-            return "あり(詳細確認要)"
-        return "なし"
-    except:
-        return "-"
+
+        except Exception as e:
+            print(f"    yutai error {code4}: {str(e)[:60]}")
+            continue
+
+    return "-"
 
 def analyze(symbol, industry, forced=False):
     info, ticker = fetch_info_retry(symbol)
@@ -441,7 +499,6 @@ def analyze(symbol, industry, forced=False):
             print("    reason: div cut " + str(cut_count) + " times no increasing trend")
             return None
     elif cut_count == 1:
-        score -= 1
         reasons.append("減配歴1回(" + div_detail + ")")
     else:
         if years_checked > 0:
