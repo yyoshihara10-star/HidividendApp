@@ -1,6 +1,8 @@
 import pandas as pd
 import yfinance as yf
 from curl_cffi import requests
+from bs4 import BeautifulSoup
+import re
 import time
 import random
 import os
@@ -66,6 +68,11 @@ def init_db():
     existing = [row[1] for row in c.execute("PRAGMA table_info(scan_results)").fetchall()]
     if "scan_id" not in existing:
         c.execute("ALTER TABLE scan_results ADD COLUMN scan_id TEXT")
+    try:
+        c.execute("ALTER TABLE scan_results ADD COLUMN yutai TEXT")
+        conn.commit()
+    except:
+        pass
 
     c.execute("""
         CREATE TABLE IF NOT EXISTS scan_status (
@@ -101,8 +108,8 @@ def save_results_batch(rows, scan_id):
     c.executemany("""
         INSERT INTO scan_results
         (scan_id, scanned_at, industry, code, name, yield_pct, payout_pct,
-         equity_pct, mcap_oku, judge, stars, note, score)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+         equity_pct, mcap_oku, judge, stars, note, score, yutai)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
     """, rows)
     conn.commit()
     conn.close()
@@ -347,6 +354,54 @@ def get_dividend_yield(info, ticker, price):
         pass
     return 0.0
 
+def get_yutai(code4):
+    """株主優待情報をkabutan.jpから取得。例: '100株以上 / 3月・9月'"""
+    try:
+        session = get_robust_session()
+        time.sleep(0.5 + random.uniform(0, 0.5))
+        url = f"https://kabutan.jp/stock/yutai?code={code4}"
+        resp = session.get(url, timeout=10)
+        if resp.status_code != 200:
+            return "-"
+        html = resp.text
+        no_yutai_markers = [
+            "株主優待はありません", "優待情報がありません",
+            "株主優待制度はありません", "優待なし", "設定されていません"
+        ]
+        if any(m in html for m in no_yutai_markers):
+            return "なし"
+        soup = BeautifulSoup(html, "html.parser")
+        month_text = ""
+        shares_text = ""
+        for table in soup.find_all("table"):
+            for row in table.find_all("tr"):
+                ths = row.find_all("th")
+                tds = row.find_all("td")
+                if not ths or not tds:
+                    continue
+                th = ths[0].get_text(strip=True)
+                td = tds[0].get_text(strip=True)
+                if "権利確定" in th or "権利月" in th:
+                    months = re.findall(r'\d+月', td)
+                    month_text = "・".join(months) if months else ""
+                elif ("最低" in th and "株" in th) or "単元株" in th:
+                    if not shares_text:
+                        nums = re.findall(r'[\d,]+', td)
+                        if nums:
+                            shares_text = nums[0].replace(",", "") + "株以上"
+        if month_text or shares_text:
+            parts = []
+            if shares_text:
+                parts.append(shares_text)
+            if month_text:
+                parts.append(month_text)
+            return " / ".join(parts)
+        if "優待" in html and "権利" in html:
+            return "あり(詳細確認要)"
+        return "なし"
+    except:
+        return "-"
+
 def analyze(symbol, industry, forced=False):
     info, ticker = fetch_info_retry(symbol)
     if info is None:
@@ -440,6 +495,8 @@ def analyze(symbol, industry, forced=False):
     m_cap = info.get("marketCap") or 0
     star  = max(1, score)
     judge = "〇" if star >= 4 else ("△" if star >= 2 else "×")
+    code4 = symbol.replace(".T", "")
+    yutai = get_yutai(code4)
 
     return {
         "dy":    dy,
@@ -451,6 +508,7 @@ def analyze(symbol, industry, forced=False):
         "note":  " / ".join(reasons) if reasons else "良好(指標クリア)",
         "score": star,
         "m_cap": m_cap,
+        "yutai": yutai,
     }
 
 def scan_sector(rows, industry, col_map, forced=False):
@@ -541,14 +599,14 @@ def main():
             candidates = scan_sector(targets, industry, col_map, forced=True)
 
         if candidates:
-            passed_stocks = sorted(candidates, key=lambda x: (x["score"], x["m_cap"]), reverse=True)
+            passed_stocks = sorted(candidates, key=lambda x: (x["dy"], x["score"]), reverse=True)
             now  = now_jst()
             new_rows = []
             for r in passed_stocks:
                 new_rows.append((
                     scan_id, now, r["industry"], r["code"], r["name"],
                     r["dy"], r["payout"], r["eq"], r["mcap"],
-                    r["judge"], r["stars"], r["note"], r["score"]
+                    r["judge"], r["stars"], r["note"], r["score"], r.get("yutai", "-")
                 ))
             save_results_batch(new_rows, scan_id)
             total_count += len(new_rows)
@@ -562,11 +620,11 @@ def main():
     if shosha_cand:
         now = now_jst()
         shosha_rows = []
-        for r in sorted(shosha_cand, key=lambda x: (x["score"], x["m_cap"]), reverse=True):
+        for r in sorted(shosha_cand, key=lambda x: (x["dy"], x["score"]), reverse=True):
             shosha_rows.append((
                 scan_id, now, r["industry"], r["code"], r["name"],
                 r["dy"], r["payout"], r["eq"], r["mcap"],
-                r["judge"], r["stars"], r["note"], r["score"]
+                r["judge"], r["stars"], r["note"], r["score"], r.get("yutai", "-")
             ))
         save_results_batch(shosha_rows, scan_id)
         total_count += len(shosha_rows)

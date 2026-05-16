@@ -2,3 +2,6 @@ streamlit
 pandas
 requests
 libsql-experimental
+yfinance
+curl_cffi
+beautifulsoup4
