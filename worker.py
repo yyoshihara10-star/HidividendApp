@@ -347,7 +347,7 @@ def get_dividend_yield(info, ticker, price):
         pass
     return 0.0
 
-def analyze(symbol, industry):
+def analyze(symbol, industry, forced=False):
     info, ticker = fetch_info_retry(symbol)
     if info is None:
         print("    reason: info failed")
@@ -364,12 +364,16 @@ def analyze(symbol, industry):
         print("    reason: abnormal yield=" + str(dy))
         return None
 
-    if dy < MIN_YIELD:
+    if not forced and dy < MIN_YIELD:
         print("    reason: low yield=" + str(dy))
         return None
 
     score   = 5
     reasons = []
+
+    if forced and dy < MIN_YIELD:
+        score -= 1
+        reasons.append("利回り" + str(dy) + "%(低め)")
 
     cut_count, years_checked, is_increasing, div_detail = check_dividend_history(ticker)
 
@@ -449,7 +453,7 @@ def analyze(symbol, industry):
         "m_cap": m_cap,
     }
 
-def scan_sector(rows, industry, col_map):
+def scan_sector(rows, industry, col_map, forced=False):
     candidates = []
     for _, row in rows.iterrows():
         raw    = str(row[col_map["code"]]).strip()
@@ -460,7 +464,7 @@ def scan_sector(rows, industry, col_map):
         symbol = code4 + ".T"
         name   = row[col_map["name"]]
         print("  checking " + symbol + " " + name)
-        res = analyze(symbol, industry)
+        res = analyze(symbol, industry, forced)
         if res:
             res["industry"] = industry
             res["code"]     = int(code4)
@@ -532,9 +536,9 @@ def main():
         sector_df = non_shosha_df[non_shosha_df[col_map["industry"]] == industry]
         targets   = get_sector_targets(sector_df, col_map)
 
-        candidates = scan_sector(targets, industry, col_map)
+        candidates = scan_sector(targets, industry, col_map, forced=False)
         if not candidates:
-            print("  -> no candidates in " + industry)
+            candidates = scan_sector(targets, industry, col_map, forced=True)
 
         if candidates:
             passed_stocks = sorted(candidates, key=lambda x: (x["score"], x["m_cap"]), reverse=True)
@@ -552,9 +556,9 @@ def main():
     print("scanning shosha...")
     set_status("current", "商社(総合商社)")
     shosha_targets = get_sector_targets(shosha_df, col_map)
-    shosha_cand = scan_sector(shosha_targets, "商社", col_map)
+    shosha_cand = scan_sector(shosha_targets, "商社", col_map, forced=False)
     if not shosha_cand:
-        print("  -> no candidates in 商社")
+        shosha_cand = scan_sector(shosha_targets, "商社", col_map, forced=True)
     if shosha_cand:
         now = now_jst()
         shosha_rows = []

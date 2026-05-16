@@ -249,6 +249,8 @@ else:
     starred_df = add_star_to_best(filtered_df, display_df, best_per_industry)
 
     def highlight_best(row):
+        if row["利回り(%)"] < 3.0:
+            return ["background-color: #e0e0e0; color: #888888"] * len(row)
         score_val = filtered_df.loc[(filtered_df["業種"] == row["業種"]) & (filtered_df["銘柄名"] == row["銘柄名"]), "score"].values
         best = best_per_industry.get(row["業種"], -1)
         if len(score_val) > 0 and score_val[0] == best:
@@ -273,6 +275,8 @@ else:
             ind_df = starred_df[starred_df["業種"] == ind].reset_index(drop=True)
             best   = best_per_industry.get(ind, -1)
             def highlight_ind(row, b=best, i=ind):
+                if row["利回り(%)"] < 3.0:
+                    return ["background-color: #e0e0e0; color: #888888"] * len(row)
                 score_val = filtered_df.loc[(filtered_df["業種"] == i) & (filtered_df["銘柄名"] == row["銘柄名"]), "score"].values
                 if len(score_val) > 0 and score_val[0] == b:
                     return ["background-color: #fff9c4; font-weight: bold"] * len(row)
