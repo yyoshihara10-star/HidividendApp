@@ -197,6 +197,9 @@ if status_data.get("state") == "running":
     current_task = status_data.get("current", "準備中...")
     st.info("⏳ **現在クラウドでスキャンを実行中です**")
     st.progress(progress / 100.0, text=f"進捗: {progress}% - 現在の処理: {current_task}")
+    st.caption("30秒ごとに自動更新されます")
+    time.sleep(0)
+    st.markdown('<meta http-equiv="refresh" content="30">', unsafe_allow_html=True)
 
 st.divider()
 
@@ -206,8 +209,31 @@ if df.empty:
     st.info("まだスキャン結果がありません。上の「スキャンを開始」ボタンを押すか、自動スキャンの完了をお待ちください。")
 else:
     scanned_at = df["スキャン日時"].iloc[0] if "スキャン日時" in df.columns else ""
-    display_df = df.drop(columns=["score", "スキャン日時"], errors="ignore")
-    best_per_industry = df.groupby("業種")["score"].max().to_dict()
+
+    with st.expander("🔍 フィルター・ソート", expanded=False):
+        f_col1, f_col2, f_col3, f_col4 = st.columns(4)
+        with f_col1:
+            min_yield = st.slider("最低利回り(%)", 3.0, 10.0, 3.0, 0.5)
+        with f_col2:
+            max_payout = st.slider("最大配当性向(%)", 30, 100, 100, 5)
+        with f_col3:
+            min_score = st.selectbox("最低おすすめ度", [1, 2, 3, 4, 5], index=0)
+        with f_col4:
+            sort_by = st.selectbox("ソート", ["おすすめ度+時価総額", "利回り高い順", "配当性向低い順"])
+
+    filtered_df = df[
+        (df["利回り(%)"] >= min_yield) &
+        (df["配当性向(%)"] <= max_payout) &
+        (df["score"] >= min_score)
+    ].copy()
+
+    if sort_by == "利回り高い順":
+        filtered_df = filtered_df.sort_values("利回り(%)", ascending=False)
+    elif sort_by == "配当性向低い順":
+        filtered_df = filtered_df.sort_values("配当性向(%)", ascending=True)
+
+    display_df = filtered_df.drop(columns=["score", "スキャン日時"], errors="ignore")
+    best_per_industry = filtered_df.groupby("業種")["score"].max().to_dict()
 
     def add_star_to_best(df_orig, disp_df, best_dict):
         res = disp_df.copy()
@@ -220,10 +246,10 @@ else:
                 res.at[idx, "備考"] = "★" + str(row["備考"])
         return res
 
-    starred_df = add_star_to_best(df, display_df, best_per_industry)
+    starred_df = add_star_to_best(filtered_df, display_df, best_per_industry)
 
     def highlight_best(row):
-        score_val = df.loc[(df["業種"] == row["業種"]) & (df["銘柄名"] == row["銘柄名"]), "score"].values
+        score_val = filtered_df.loc[(filtered_df["業種"] == row["業種"]) & (filtered_df["銘柄名"] == row["銘柄名"]), "score"].values
         best = best_per_industry.get(row["業種"], -1)
         if len(score_val) > 0 and score_val[0] == best:
             return ["background-color: #fff9c4; font-weight: bold"] * len(row)
@@ -233,7 +259,7 @@ else:
     st.subheader(f"スクリーニング結果 {len(display_df)} 銘柄  ({disp_id})")
     st.caption("黄色ハイライト・備考欄★ = 各業種トップ推奨")
 
-    industries = df["業種"].unique().tolist()
+    industries = filtered_df["業種"].unique().tolist()
     if "商社" in industries:
         industries = ["商社"] + [i for i in industries if i != "商社"]
 
@@ -247,7 +273,7 @@ else:
             ind_df = starred_df[starred_df["業種"] == ind].reset_index(drop=True)
             best   = best_per_industry.get(ind, -1)
             def highlight_ind(row, b=best, i=ind):
-                score_val = df.loc[(df["業種"] == i) & (df["銘柄名"] == row["銘柄名"]), "score"].values
+                score_val = filtered_df.loc[(filtered_df["業種"] == i) & (filtered_df["銘柄名"] == row["銘柄名"]), "score"].values
                 if len(score_val) > 0 and score_val[0] == b:
                     return ["background-color: #fff9c4; font-weight: bold"] * len(row)
                 return [""] * len(row)

@@ -92,18 +92,26 @@ def set_status(key, value):
     conn.commit()
     conn.close()
 
-def save_results(rows, scan_id):
+def save_results_batch(rows, scan_id):
+    """業種単位で追記保存（全削除→再INSERT方式をやめる）"""
     if not rows:
         return
     conn = get_db_conn()
     c = conn.cursor()
-    c.execute("DELETE FROM scan_results WHERE scan_id = ?", (scan_id,))
     c.executemany("""
         INSERT INTO scan_results
         (scan_id, scanned_at, industry, code, name, yield_pct, payout_pct,
          equity_pct, mcap_oku, judge, stars, note, score)
         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
     """, rows)
+    conn.commit()
+    conn.close()
+
+def clear_scan_results(scan_id):
+    """スキャン開始時に1回だけ呼ぶ"""
+    conn = get_db_conn()
+    c = conn.cursor()
+    c.execute("DELETE FROM scan_results WHERE scan_id = ?", (scan_id,))
     conn.commit()
     conn.close()
 
@@ -322,7 +330,24 @@ def fetch_info_retry(symbol):
                 return None, None
     return None, None
 
-def analyze(symbol, industry, forced=False):
+def get_dividend_yield(info, ticker, price):
+    """利回りを計算。dividendRateが取れない場合はdividendsの直近1年合計を使用"""
+    div_rate = info.get("dividendRate") or info.get("trailingAnnualDividendRate") or 0
+    if div_rate > 0:
+        return round(div_rate / price * 100, 2)
+    try:
+        divs = ticker.dividends
+        if divs is not None and len(divs) > 0:
+            divs.index = divs.index.tz_localize(None) if divs.index.tzinfo else divs.index
+            cutoff = pd.Timestamp.now() - pd.DateOffset(years=1)
+            recent = divs[divs.index >= cutoff].sum()
+            if recent > 0:
+                return round(recent / price * 100, 2)
+    except:
+        pass
+    return 0.0
+
+def analyze(symbol, industry):
     info, ticker = fetch_info_retry(symbol)
     if info is None:
         print("    reason: info failed")
@@ -333,23 +358,18 @@ def analyze(symbol, industry, forced=False):
         print("    reason: no price")
         return None
 
-    div_rate = info.get("dividendRate") or info.get("trailingAnnualDividendRate") or 0
-    dy = round(div_rate / price * 100, 2)
+    dy = get_dividend_yield(info, ticker, price)
 
     if dy > 30:
         print("    reason: abnormal yield=" + str(dy))
         return None
 
-    if not forced and dy < MIN_YIELD:
+    if dy < MIN_YIELD:
         print("    reason: low yield=" + str(dy))
         return None
 
     score   = 5
     reasons = []
-
-    if forced and dy < MIN_YIELD:
-        score -= 1
-        reasons.append("利回り" + str(dy) + "%(低め)")
 
     cut_count, years_checked, is_increasing, div_detail = check_dividend_history(ticker)
 
@@ -429,7 +449,7 @@ def analyze(symbol, industry, forced=False):
         "m_cap": m_cap,
     }
 
-def scan_sector(rows, industry, col_map, forced=False):
+def scan_sector(rows, industry, col_map):
     candidates = []
     for _, row in rows.iterrows():
         raw    = str(row[col_map["code"]]).strip()
@@ -440,7 +460,7 @@ def scan_sector(rows, industry, col_map, forced=False):
         symbol = code4 + ".T"
         name   = row[col_map["name"]]
         print("  checking " + symbol + " " + name)
-        res = analyze(symbol, industry, forced)
+        res = analyze(symbol, industry)
         if res:
             res["industry"] = industry
             res["code"]     = int(code4)
@@ -467,6 +487,7 @@ def main():
     set_status("started",  started_at)
     set_status("scan_id",  scan_id)
     update_history(scan_id, started_at, "", 0, "running")
+    clear_scan_results(scan_id)
 
     try:
         df, col_map = fetch_jpx_prime()
@@ -501,7 +522,7 @@ def main():
         return
 
     total       = len(all_industries) + 1
-    all_results = []
+    total_count = 0
 
     for idx, industry in enumerate(all_industries):
         print("[" + str(idx+1) + "/" + str(total) + "] " + industry)
@@ -511,46 +532,48 @@ def main():
         sector_df = non_shosha_df[non_shosha_df[col_map["industry"]] == industry]
         targets   = get_sector_targets(sector_df, col_map)
 
-        candidates = scan_sector(targets, industry, col_map, forced=False)
+        candidates = scan_sector(targets, industry, col_map)
         if not candidates:
-            candidates = scan_sector(targets, industry, col_map, forced=True)
+            print("  -> no candidates in " + industry)
 
         if candidates:
-            # ★ここで5件制限を解除し、条件をクリアした全銘柄を保存するようにしました！
             passed_stocks = sorted(candidates, key=lambda x: (x["score"], x["m_cap"]), reverse=True)
             now  = now_jst()
+            new_rows = []
             for r in passed_stocks:
-                all_results.append((
+                new_rows.append((
                     scan_id, now, r["industry"], r["code"], r["name"],
                     r["dy"], r["payout"], r["eq"], r["mcap"],
                     r["judge"], r["stars"], r["note"], r["score"]
                 ))
-            save_results(all_results, scan_id)
+            save_results_batch(new_rows, scan_id)
+            total_count += len(new_rows)
 
     print("scanning shosha...")
     set_status("current", "商社(総合商社)")
     shosha_targets = get_sector_targets(shosha_df, col_map)
-    shosha_cand = scan_sector(shosha_targets, "商社", col_map, forced=False)
+    shosha_cand = scan_sector(shosha_targets, "商社", col_map)
     if not shosha_cand:
-        shosha_cand = scan_sector(shosha_targets, "商社", col_map, forced=True)
+        print("  -> no candidates in 商社")
     if shosha_cand:
         now = now_jst()
-        # ★商社も全件保存します
+        shosha_rows = []
         for r in sorted(shosha_cand, key=lambda x: (x["score"], x["m_cap"]), reverse=True):
-            all_results.append((
+            shosha_rows.append((
                 scan_id, now, r["industry"], r["code"], r["name"],
                 r["dy"], r["payout"], r["eq"], r["mcap"],
                 r["judge"], r["stars"], r["note"], r["score"]
             ))
+        save_results_batch(shosha_rows, scan_id)
+        total_count += len(shosha_rows)
 
-    save_results(all_results, scan_id)
     finished_at = now_jst()
     set_status("state",    "done")
     set_status("progress", "100")
     set_status("finished", finished_at)
-    set_status("current",  "完了(" + str(len(all_results)) + "銘柄)")
-    update_history(scan_id, started_at, finished_at, len(all_results), "done")
-    print("=== done: " + str(len(all_results)) + " ===")
+    set_status("current",  "完了(" + str(total_count) + "銘柄)")
+    update_history(scan_id, started_at, finished_at, total_count, "done")
+    print("=== done: " + str(total_count) + " ===")
 
 if __name__ == "__main__":
     main()
