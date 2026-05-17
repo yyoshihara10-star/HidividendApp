@@ -454,11 +454,14 @@ def _parse_yutai_html(html):
                 if months:
                     month_text = "・".join(dict.fromkeys(months))
 
-            if not shares_text and any(k in txt for k in ["最低", "単元", "株数", "必要株"]):
+            # "最低" は「最低投資金額」にも一致するため除外。株数ラベルのみ対象
+            SHARE_LABELS = ["単元株数", "売買単位", "必要株数", "最低株数", "最低購入株数", "単元"]
+            if not shares_text and any(k in txt for k in SHARE_LABELS):
                 nums = re.findall(r'[\d,]+', val)
                 if nums:
                     n = int(nums[0].replace(",", ""))
-                    if 1 <= n <= 1000000:
+                    # 投資金額（数万〜数十万）と区別するため上限を10000株に設定
+                    if 1 <= n <= 10000:
                         shares_text = f"{n}株以上"
 
     # regex フォールバック: "権利確定月" の直後のみ月を探す（ナビ誤検知防止）
@@ -467,12 +470,12 @@ def _parse_yutai_html(html):
         if m:
             month_text = m.group(1) + "月"
 
-    # 株数は "1単元(100株)" という明示的パターンのみ（"〇〇株以上" は広すぎて誤検知）
+    # 株数は "1単元(100株)" という明示的パターンのみ
     if not shares_text:
         m = re.search(r'1単元[（(](\d[\d,]*)株[）)]', html)
         if m:
             n = int(m.group(1).replace(",", ""))
-            if 1 <= n <= 1000000:
+            if 1 <= n <= 10000:
                 shares_text = f"{n}株以上"
 
     return shares_text, month_text
@@ -521,14 +524,16 @@ def get_yutai(code4):
             # 構造化データを厳格にパース
             shares_text, month_text = _parse_yutai_html(html)
 
-            if month_text or shares_text:
+            # 権利確定月は yutai 固有情報なので月あり = 確実にあり
+            # 株数のみ（月なし）は単元株数の誤検知リスクが高いため不採用
+            if month_text:
                 parts = [p for p in [shares_text, month_text] if p]
                 result = " / ".join(parts)
                 print(f"    yutai {code4}: {result}")
                 return result
 
             # ページは取得できたが判定不可 → 次のURLへ
-            print(f"    yutai {code4}: パース失敗、次URL試行")
+            print(f"    yutai {code4}: 月情報なし、次URL試行")
 
         except Exception as e:
             print(f"    yutai error {code4}: {str(e)[:60]}")
