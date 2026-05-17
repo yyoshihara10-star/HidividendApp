@@ -704,7 +704,7 @@ else:
             yield_val = df_orig.loc[df_orig["コード"] == code, "利回り(%)"].values
             note_val  = df_orig.loc[df_orig["コード"] == code, "備考"].values
             _NEGATIVE_KEYWORDS = ["減配歴", "成長データ不明", "10年未満", "減配確定",
-                                   "売上減", "利益減", "配当性向", "自己資本", "低め)"]
+                                   "減配予定", "売上減", "利益減", "配当性向", "自己資本", "低め)"]
             note_str = str(note_val[0]) if len(note_val) > 0 else ""
             has_negative = any(k in note_str for k in _NEGATIVE_KEYWORDS)
             if (len(score_val) > 0 and score_val[0] == 5 and
