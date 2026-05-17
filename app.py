@@ -63,26 +63,93 @@ except ImportError:
     import sqlite3 as db_lib
 
 st.set_page_config(page_title="プライム高配当株スクリーニング", layout="wide")
-st.title("高配当株スクリーニング")
 
-with st.expander("スクリーニング条件・情報ソースを見る"):
-    st.markdown("""
-**対象**: 東証プライム上場銘柄（JPX銘柄一覧を毎月1日に自動取得・更新）
+st.markdown("""
+<style>
+/* ===== 全体リセット ===== */
+.block-container { padding-top: 0 !important; padding-bottom: 100px !important; }
+header[data-testid="stHeader"] { background: transparent !important; }
+#MainMenu, footer { visibility: hidden; }
 
-**除外条件**
-* 配当利回り 3.0%未満 ／ 配当性向 30%未満または70%超（業績回復見込みなし）
-* 自己資本比率 40%未満（金融業種を除く）
-* 過去10年で減配2回以上 かつ 増配傾向なし
-* 当年の減配が確定済み、または前年減配かつ当年の増配が未確認
+/* ===== カスタムヘッダー ===== */
+.app-header {
+    background: linear-gradient(135deg, #0d47a1 0%, #1565c0 100%);
+    color: #fff;
+    padding: 14px 20px 12px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin: -4rem -4rem 1.5rem -4rem;
+}
+.app-header .main-title { font-size: 18px; font-weight: 800; letter-spacing: 0.3px; }
+.app-header .sub-title  { font-size: 11px; opacity: 0.75; margin-top: 3px; }
 
-**おすすめ度（★1〜5）** ※基本5点から減点
-* 減配2回以上（増配傾向あり） -2 ／ それ以外の基準外項目 各-1
-* ★5 かつ 利回り3.5%以上がおすすめタブに掲載
+/* ===== サマリーカード ===== */
+[data-testid="metric-container"] {
+    background: #f0f4ff;
+    border-radius: 12px;
+    padding: 14px 16px !important;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.06);
+}
+[data-testid="metric-container"] label { font-size: 11px !important; color: #888 !important; }
+[data-testid="metric-container"] [data-testid="stMetricValue"] { font-size: 26px !important; font-weight: 800 !important; color: #1565c0 !important; }
+[data-testid="metric-container"] [data-testid="stMetricDelta"] { font-size: 12px !important; }
 
-**情報ソース**
-* 株価・配当・財務: Yahoo Finance ／ 株主優待: かぶたん・みんかぶ
-""")
-st.caption("※スキャンはGitHubのサーバーで安全に実行され、結果がここに表示されます。")
+/* ===== サイドバー ===== */
+[data-testid="stSidebar"] > div:first-child { background: #0d1b3e; }
+[data-testid="stSidebar"] .stMarkdown p,
+[data-testid="stSidebar"] .stMarkdown li,
+[data-testid="stSidebar"] label,
+[data-testid="stSidebar"] .stSelectbox label,
+[data-testid="stSidebar"] .stSlider label { color: rgba(255,255,255,0.85) !important; }
+[data-testid="stSidebar"] h3 { color: rgba(255,255,255,0.5) !important; font-size: 10px !important; letter-spacing: 1px; text-transform: uppercase; margin-top: 1rem; }
+[data-testid="stSidebar"] hr { border-color: rgba(255,255,255,0.1) !important; }
+
+/* ===== 実行中バナー ===== */
+.running-banner {
+    background: linear-gradient(90deg, #fff3e0, #ffe0b2);
+    border-left: 4px solid #ff6f00;
+    border-radius: 8px;
+    padding: 10px 16px;
+    margin-bottom: 12px;
+    font-weight: 600;
+    color: #e65100;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+/* ===== モバイル: 下部固定ボタンバー ===== */
+.mobile-bottom-bar {
+    display: none;
+    position: fixed;
+    bottom: 0; left: 0; right: 0;
+    background: #fff;
+    border-top: 1px solid #e8eaf0;
+    padding: 10px 16px;
+    gap: 8px;
+    z-index: 999;
+}
+@media (max-width: 768px) {
+    .mobile-bottom-bar { display: flex; }
+    .app-header { margin: -1rem -1rem 1rem -1rem; }
+    .block-container { padding-bottom: 80px !important; }
+}
+.mbb-btn {
+    flex: 1;
+    padding: 10px 6px;
+    border-radius: 10px;
+    border: none;
+    font-size: 12px;
+    font-weight: 700;
+    cursor: pointer;
+    text-align: center;
+}
+.mbb-scan    { background: #0d47a1; color: #fff; }
+.mbb-refresh { background: #f0f2f6; color: #444; }
+.mbb-csv     { background: #f0f2f6; color: #444; }
+</style>
+""", unsafe_allow_html=True)
 
 DB_PATH = "results.db"
 
@@ -444,80 +511,122 @@ def delete_scan(scan_id):
 if "selected_scan_id" not in st.session_state:
     st.session_state["selected_scan_id"] = None
 
-# ---------------- UI部分 ----------------
-
-st.divider()
-
-col1, col2, col3 = st.columns([4, 3, 3])
-
-with col1:
-    if st.button("▶️ スキャンを手動で開始 (クラウド実行)", type="primary", use_container_width=True):
+# ---------------- サイドバー ----------------
+with st.sidebar:
+    st.markdown("### アクション")
+    if st.button("▶ スキャン開始 (クラウド実行)", type="primary", use_container_width=True):
         with st.spinner("GitHubへスキャン開始の指示を送信中..."):
             success, msg = trigger_github_workflow()
             if success:
-                st.session_state["selected_scan_id"] = None # ★スキャン開始時は自動で「現在」に戻す
+                st.session_state["selected_scan_id"] = None
                 st.success(msg)
                 time.sleep(2)
                 st.rerun()
             else:
                 st.error(msg)
-
-with col2:
-    # ★このボタンを押すと、過去の選択が解除されて「現在（最新）」に戻ります！
-    if st.button("🔄 最新の状態に戻す / 更新", use_container_width=True):
-        st.session_state["selected_scan_id"] = None 
+    if st.button("🔄 最新に更新", use_container_width=True):
+        st.session_state["selected_scan_id"] = None
         st.rerun()
+    st.link_button("📜 GitHub ライブログ",
+                   "https://github.com/yyoshihara10-star/HidividendApp/actions",
+                   use_container_width=True)
 
-with col3:
-    st.link_button(
-        "📜 ライブログ (GitHub) を見る", 
-        "https://github.com/yyoshihara10-star/HidividendApp/actions", 
-        use_container_width=True
-    )
+    st.markdown("---")
+    st.markdown("### フィルター")
+    min_yield  = st.slider("最低利回り(%)", 3.0, 10.0, 3.0, 0.5)
+    max_payout = st.slider("配当性向 上限(%)", 30, 100, 100, 5)
+    min_score  = st.selectbox("最低おすすめ度", [1, 2, 3, 4, 5], index=0)
+    sort_by    = st.selectbox("ソート順", ["利回り高い順+おすすめ度高い順", "おすすめ度高い順", "配当性向低い順"])
 
+    st.markdown("---")
+    with st.expander("スクリーニング条件・情報ソース"):
+        st.markdown("""
+**対象**: 東証プライム（JPX、毎月1日更新）
+
+**除外条件**
+* 利回り3%未満 / 性向30%未満・70%超（回復見込みなし）
+* 自己資本40%未満（金融除く）
+* 減配2回以上かつ増配傾向なし
+* 当年減配確定 / 前年減配かつ今年増配未確認
+
+**おすすめ度（★1〜5）**  基本5点から減点
+* 減配2回以上(増配傾向あり) -2 / その他基準外 各-1
+* ★5・利回り3.5%以上 → おすすめタブ掲載
+
+**情報ソース**
+* 株価・財務: Yahoo Finance
+* 株主優待: かぶたん・みんかぶ
+""")
+
+    st.markdown("---")
+    st.markdown("### スキャン履歴")
+    _history_df = get_history()
+    _done_history = _history_df[_history_df["status"] == "done"] if not _history_df.empty else pd.DataFrame()
+    if not _done_history.empty:
+        _hist_options = ["最新"] + [
+            f"{r['scan_id']}  ({r['result_count']}銘柄)"
+            for _, r in _done_history.iterrows()
+        ]
+        _hist_ids = [None] + list(_done_history["scan_id"])
+        _hist_sel = st.selectbox("表示するスキャン", _hist_options, index=0, label_visibility="collapsed")
+        _sel_idx  = _hist_options.index(_hist_sel)
+        if _hist_ids[_sel_idx] != st.session_state["selected_scan_id"]:
+            st.session_state["selected_scan_id"] = _hist_ids[_sel_idx]
+            st.rerun()
+        # 過去履歴選択中は削除ボタンを表示
+        _viewing_sid = _hist_ids[_sel_idx]
+        if _viewing_sid:
+            if st.button(f"🗑 削除 ({_viewing_sid})", use_container_width=True):
+                delete_scan(_viewing_sid)
+                st.session_state["selected_scan_id"] = None
+                st.toast(f"{_viewing_sid} を削除しました")
+                st.rerun()
+    else:
+        st.caption("履歴なし")
+
+# ---------------- メインコンテンツ ----------------
 selected_scan_id = st.session_state["selected_scan_id"]
+status_data      = get_scan_status()
+_current_sid     = selected_scan_id if selected_scan_id else get_latest_scan_id()
+df               = get_results(_current_sid)
+_prev_df         = get_prev_results(_current_sid) if _current_sid else pd.DataFrame()
 
-# ★過去の履歴を見ている時は、わかりやすく警告を出すようにしました
-if selected_scan_id:
-    st.warning(f"🕒 現在、過去の履歴 ({selected_scan_id}) を表示しています。「最新の状態に戻す / 更新」ボタンで現在の状況に戻れます。")
+# カスタムヘッダー
+_scan_date = ""
+if not df.empty and "スキャン日時" in df.columns:
+    try:
+        _scan_date = datetime.strptime(df["スキャン日時"].iloc[0], "%Y-%m-%d %H:%M:%S").strftime("%Y年%m月%d日")
+    except Exception:
+        _scan_date = df["スキャン日時"].iloc[0]
+_hist_label = f"履歴表示中: {selected_scan_id}" if selected_scan_id else f"最終更新: {_scan_date}" if _scan_date else "データなし"
+st.markdown(f"""
+<div class="app-header">
+  <div>
+    <div class="main-title">高配当株スクリーニング</div>
+    <div class="sub-title">{_hist_label}</div>
+  </div>
+</div>
+""", unsafe_allow_html=True)
 
-# 裏側の進捗状況をチェックして表示する
-status_data = get_scan_status()
+# 実行中バナー
 if status_data.get("state") == "running":
-    progress = int(status_data.get("progress", 0))
+    progress     = int(status_data.get("progress", 0))
     current_task = status_data.get("current", "準備中...")
-    st.info("⏳ **現在クラウドでスキャンを実行中です**")
-    st.progress(progress / 100.0, text=f"進捗: {progress}% - 現在の処理: {current_task}")
-    st.caption("30秒ごとに自動更新されます")
-    time.sleep(0)
+    st.markdown(f'<div class="running-banner">⏳ スキャン実行中... {progress}% — {current_task}</div>', unsafe_allow_html=True)
+    st.progress(progress / 100.0)
+    st.caption("30秒ごとに自動更新")
     st.markdown('<meta http-equiv="refresh" content="30">', unsafe_allow_html=True)
 
-st.divider()
-
-_current_sid = selected_scan_id if selected_scan_id else get_latest_scan_id()
-df = get_results(_current_sid)
-_prev_df = get_prev_results(_current_sid) if _current_sid else pd.DataFrame()
-
 if df.empty:
-    st.info("まだスキャン結果がありません。上の「スキャンを開始」ボタンを押すか、自動スキャンの完了をお待ちください。")
+    st.info("まだスキャン結果がありません。サイドバーの「スキャン開始」ボタンを押すか、自動スキャンの完了をお待ちください。")
 else:
     scanned_at = df["スキャン日時"].iloc[0] if "スキャン日時" in df.columns else ""
 
-    with st.expander("🔍 フィルター・ソート", expanded=False):
-        f_col1, f_col2, f_col3, f_col4 = st.columns(4)
-        with f_col1:
-            min_yield = st.slider("最低利回り(%)", 3.0, 10.0, 3.0, 0.5)
-        with f_col2:
-            max_payout = st.slider("最大配当性向(%)", 30, 100, 100, 5)
-        with f_col3:
-            min_score = st.selectbox("最低おすすめ度", [1, 2, 3, 4, 5], index=0)
-        with f_col4:
-            sort_by = st.selectbox("ソート", ["利回り高い順+おすすめ度高い順", "おすすめ度高い順", "配当性向低い順"])
-
     search_query = st.text_input(
-        "🔎 キーワード検索",
-        placeholder="銘柄名・業種・コード・備考・株主優待など...",
-        key="result_search"
+        "",
+        placeholder="🔎  銘柄名・コード・業種・備考で検索...",
+        key="result_search",
+        label_visibility="collapsed"
     )
 
     filtered_df = df[
@@ -574,16 +683,7 @@ else:
     starred_with_changes = apply_changes_to_display(starred_df, _changes)
     _highlighter = make_highlighter(filtered_df, _changes)
 
-    disp_id = _current_sid
-    st.subheader(f"スクリーニング結果 {len(display_df)} 銘柄  ({disp_id})")
-    change_note = "青=前回比良化 / 赤=前回比悪化" if _changes else "前回スキャンなし（変化比較不可）"
-    st.caption(f"黄色ハイライト・備考欄★ = 利回り3.5%以上かつおすすめ度★★★★★　|　{change_note}")
-
-    industries = filtered_df["業種"].unique().tolist()
-    if "商社" in industries:
-        industries = ["商社"] + [i for i in industries if i != "商社"]
-
-    # おすすめタブ用データ（score>=4 かつ 利回り>=3.5%、優待あり優先）
+    # おすすめタブ用データを先に計算（サマリーカードに使う）
     def _is_osusume_eligible(note):
         _EXCLUDE = ["配当性向", "低め)"]
         return not any(k in str(note) for k in _EXCLUDE)
@@ -593,6 +693,28 @@ else:
         (filtered_df["利回り(%)"] >= 3.5) &
         (filtered_df["備考"].apply(_is_osusume_eligible))
     ].copy()
+
+    # サマリーカード
+    _max_yield = filtered_df["利回り(%)"].max() if not filtered_df.empty else 0
+    _prev_count = len(_prev_df["コード"].unique()) if not _prev_df.empty else None
+    _delta_count = len(filtered_df) - _prev_count if _prev_count else None
+    _mc1, _mc2, _mc3, _mc4 = st.columns(4)
+    with _mc1:
+        st.metric("★ おすすめ", f"{len(osusume_src)} 銘柄")
+    with _mc2:
+        st.metric("全銘柄", f"{len(filtered_df)} 銘柄",
+                  delta=f"{_delta_count:+d}" if _delta_count is not None else None)
+    with _mc3:
+        st.metric("最高利回り", f"{_max_yield:.1f}%")
+    with _mc4:
+        change_note = "青=良化 / 赤=悪化" if _changes else "前回比較なし"
+        st.metric("前回比", change_note)
+
+    st.caption("黄色ハイライト・★ = 利回り3.5%以上かつおすすめ度★★★★★")
+
+    industries = filtered_df["業種"].unique().tolist()
+    if "商社" in industries:
+        industries = ["商社"] + [i for i in industries if i != "商社"]
 
     def _yutai_rank(v):
         if not isinstance(v, str) or v in ("-", ""):
@@ -667,27 +789,3 @@ else:
             st.caption(f"除外銘柄: {len(disp_log)} / {len(log_df)} 件")
             st.dataframe(disp_log.reset_index(drop=True), use_container_width=True)
 
-st.divider()
-st.subheader("過去の履歴")
-history_df = get_history()
-if not history_df.empty:
-    for _, r in history_df[history_df["status"] == "done"].iterrows():
-        sid = r["scan_id"]
-        info_str = str(r["started_at"]) + f"  {r['result_count']}銘柄"
-        
-        c1, c2 = st.columns([10, 1])
-        with c1:
-            is_selected = (st.session_state["selected_scan_id"] == sid)
-            label = f"▶ {sid} ({info_str})" if is_selected else f"{sid} ({info_str})"
-            if st.button(label, key=f"btn_{sid}", use_container_width=True):
-                st.session_state["selected_scan_id"] = sid
-                st.rerun()
-        with c2:
-            if st.button("🗑", key=f"del_{sid}"):
-                delete_scan(sid)
-                if st.session_state["selected_scan_id"] == sid:
-                    st.session_state["selected_scan_id"] = None
-                st.toast(f"{sid} を削除しました")
-                st.rerun()
-else:
-    st.info("保存された履歴はありません")
