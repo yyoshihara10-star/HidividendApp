@@ -606,6 +606,11 @@ st.markdown(f"""
     <div class="sub-title">{_hist_label}</div>
   </div>
 </div>
+<div class="mobile-bottom-bar">
+  <button class="mbb-btn mbb-scan" onclick="(function(){{var bs=document.querySelectorAll('[data-testid=stSidebar] button');for(var b of bs){{if(b.textContent.includes('スキャン')){{b.click();break;}}}}}})()">▶ スキャン</button>
+  <button class="mbb-btn mbb-refresh" onclick="(function(){{var bs=document.querySelectorAll('[data-testid=stSidebar] button');for(var b of bs){{if(b.textContent.includes('更新')){{b.click();break;}}}}}})()">🔄 更新</button>
+  <button class="mbb-btn mbb-csv" onclick="(function(){{var bs=document.querySelectorAll('[data-testid=stDownloadButton] button');if(bs[0])bs[0].click();}})()">📥 CSV</button>
+</div>
 """, unsafe_allow_html=True)
 
 # 実行中バナー
@@ -694,23 +699,33 @@ else:
         (filtered_df["備考"].apply(_is_osusume_eligible))
     ].copy()
 
-    # サマリーカード
-    _max_yield = filtered_df["利回り(%)"].max() if not filtered_df.empty else 0
-    _prev_count = len(_prev_df["コード"].unique()) if not _prev_df.empty else None
-    _delta_count = len(filtered_df) - _prev_count if _prev_count else None
-    _mc1, _mc2, _mc3, _mc4 = st.columns(4)
-    with _mc1:
-        st.metric("★ おすすめ", f"{len(osusume_src)} 銘柄")
-    with _mc2:
-        st.metric("全銘柄", f"{len(filtered_df)} 銘柄",
-                  delta=f"{_delta_count:+d}" if _delta_count is not None else None)
-    with _mc3:
-        st.metric("最高利回り", f"{_max_yield:.1f}%")
-    with _mc4:
-        change_note = "青=良化 / 赤=悪化" if _changes else "前回比較なし"
-        st.metric("前回比", change_note)
-
-    st.caption("黄色ハイライト・★ = 利回り3.5%以上かつおすすめ度★★★★★")
+    # サマリーカード（コンパクトHTML）
+    _max_yield   = filtered_df["利回り(%)"].max() if not filtered_df.empty else 0
+    _prev_count  = len(_prev_df["コード"].unique()) if not _prev_df.empty else None
+    _delta_count = len(filtered_df) - _prev_count if _prev_count is not None else None
+    _delta_str   = f'<span style="color:{"#2e7d32" if _delta_count and _delta_count>=0 else "#c62828"};font-size:11px">{f"{_delta_count:+d}件" if _delta_count is not None else ""}</span>'
+    _change_note = "青=良化 / 赤=悪化" if _changes else "比較なし"
+    st.markdown(f"""
+<div style="display:flex;gap:8px;margin:8px 0 12px;flex-wrap:wrap">
+  <div style="flex:1;min-width:120px;background:#fff9c4;border-radius:10px;padding:10px 14px;box-shadow:0 1px 3px rgba(0,0,0,0.07)">
+    <div style="font-size:10px;color:#888;margin-bottom:2px">★ おすすめ</div>
+    <div style="font-size:22px;font-weight:800;color:#f57f17">{len(osusume_src)}<span style="font-size:12px;font-weight:400"> 銘柄</span></div>
+  </div>
+  <div style="flex:1;min-width:120px;background:#f0f4ff;border-radius:10px;padding:10px 14px;box-shadow:0 1px 3px rgba(0,0,0,0.07)">
+    <div style="font-size:10px;color:#888;margin-bottom:2px">全銘柄 {_delta_str}</div>
+    <div style="font-size:22px;font-weight:800;color:#1565c0">{len(filtered_df)}<span style="font-size:12px;font-weight:400"> 銘柄</span></div>
+  </div>
+  <div style="flex:1;min-width:120px;background:#f0f4ff;border-radius:10px;padding:10px 14px;box-shadow:0 1px 3px rgba(0,0,0,0.07)">
+    <div style="font-size:10px;color:#888;margin-bottom:2px">最高利回り</div>
+    <div style="font-size:22px;font-weight:800;color:#e65100">{_max_yield:.1f}<span style="font-size:12px;font-weight:400"> %</span></div>
+  </div>
+  <div style="flex:1;min-width:120px;background:#f0f4ff;border-radius:10px;padding:10px 14px;box-shadow:0 1px 3px rgba(0,0,0,0.07)">
+    <div style="font-size:10px;color:#888;margin-bottom:2px">前回比</div>
+    <div style="font-size:13px;font-weight:700;color:#444;margin-top:4px">{_change_note}</div>
+  </div>
+</div>
+<div style="font-size:11px;color:#888;margin-bottom:8px">黄色ハイライト・★ = 利回り3.5%以上かつ★★★★★</div>
+""", unsafe_allow_html=True)
 
     industries = filtered_df["業種"].unique().tolist()
     if "商社" in industries:
@@ -744,12 +759,12 @@ else:
             st.info("おすすめ条件（利回り3.5%以上・おすすめ度★★★★以上）に該当する銘柄はありません。")
         else:
             st.dataframe(_os.style.apply(_os_highlighter, axis=1),
-                         column_config=_col_cfg, use_container_width=True)
+                         column_config=_col_cfg, use_container_width=True, height=600)
 
     with tabs[1]:
         _all = with_1idx(apply_search(starred_with_changes, search_query))
         st.dataframe(_all.style.apply(_highlighter, axis=1),
-                     column_config=_col_cfg, use_container_width=True)
+                     column_config=_col_cfg, use_container_width=True, height=600)
 
     for tab, ind in zip(tabs[2:], industries):
         with tab:
@@ -759,7 +774,7 @@ else:
             ))
             _ind_hl = make_highlighter(ind_src, _changes)
             st.dataframe(ind_disp.style.apply(_ind_hl, axis=1),
-                         column_config=_col_cfg, use_container_width=True)
+                         column_config=_col_cfg, use_container_width=True, height=600)
 
     try:
         dt_str = datetime.strptime(scanned_at, "%Y-%m-%d %H:%M:%S").strftime("%Y%m%d_%H%M%S")
