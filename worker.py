@@ -242,7 +242,7 @@ def check_dividend_history(ticker):
             return [[int(a.index[i].year), round(float(a.iloc[i]), 1)] for i in range(len(a))]
 
         if len(annual) < 2:
-            return 0, len(annual), False, "配当履歴" + str(len(annual)) + "年分", _annual_data(annual), 0
+            return 0, len(annual), False, "配当履歴" + str(len(annual)) + "年分", _annual_data(annual), 0, False
 
         years_checked = len(annual)
         cut_count     = 0
@@ -278,16 +278,19 @@ def check_dividend_history(ticker):
             else:
                 break
 
+        # 直前の完了年が減配だったか
+        last_year_cut = len(annual) >= 2 and annual.iloc[-1] < annual.iloc[-2] * 0.95
+
         detail = "配当" + str(years_checked) + "年確認"
         if is_increasing:
             detail += "/増加傾向"
         if cut_years:
             detail += "/減配:" + ",".join(cut_years)
 
-        return cut_count, years_checked, is_increasing, detail, _annual_data(annual), consecutive_increase
+        return cut_count, years_checked, is_increasing, detail, _annual_data(annual), consecutive_increase, last_year_cut
 
     except Exception as e:
-        return 0, 0, False, "配当履歴取得失敗", [], 0
+        return 0, 0, False, "配当履歴取得失敗", [], 0, False
 
 def make_div_history_str(cut_count, years_checked, is_increasing):
     if years_checked == 0:
@@ -589,7 +592,7 @@ def analyze(symbol, industry, forced=False):
         score -= 1
         reasons.append("利回り" + str(dy) + "%(低め)")
 
-    cut_count, years_checked, is_increasing, div_detail, annual_list, consecutive_increase = check_dividend_history(ticker)
+    cut_count, years_checked, is_increasing, div_detail, annual_list, consecutive_increase, last_year_cut = check_dividend_history(ticker)
     div_history = make_div_history_str(cut_count, years_checked, is_increasing)
     div_trend   = json.dumps(annual_list) if annual_list else "[]"
 
@@ -614,7 +617,8 @@ def analyze(symbol, industry, forced=False):
     elif 0 < years_checked < 10:
         reasons.append("配当歴" + str(years_checked) + "年(10年未満)")
 
-    # 当年配当確定分：前年同期比で増減を備考に表記
+    # 当年配当確定分：前年同期比チェック（減配確定は除外、前年減配+今年増配未確認も除外）
+    curr_year_increase = False
     try:
         rd = ticker.dividends
         if rd is not None and len(rd) > 0:
@@ -631,13 +635,22 @@ def analyze(symbol, industry, forced=False):
                 if prev_sum > 0:
                     chg = (curr_sum - prev_sum) / prev_sum * 100
                     if chg >= 5:
+                        curr_year_increase = True
                         reasons.append(str(cur_yr) + "年増配確定(" + str(round(curr_sum, 1)) + "円/前年同期比+" + str(round(chg, 1)) + "%)")
                     elif chg <= -5:
-                        reasons.append(str(cur_yr) + "年減配確定(" + str(round(curr_sum, 1)) + "円/前年同期比" + str(round(chg, 1)) + "%)")
+                        print("    reason: " + str(cur_yr) + "年減配確定")
+                        return {"excluded": True, "reason": str(cur_yr) + "年減配確定(" + str(round(curr_sum, 1)) + "円/前年同期比" + str(round(chg, 1)) + "%)", "dy": dy}
+                    else:
+                        reasons.append(str(cur_yr) + "年配当確定(" + str(round(curr_sum, 1)) + "円)")
                 else:
                     reasons.append(str(cur_yr) + "年配当確定(" + str(round(curr_sum, 1)) + "円)")
     except Exception:
         pass
+
+    if last_year_cut and not curr_year_increase:
+        prev_yr = pd.Timestamp.now().year - 1
+        print("    reason: " + str(prev_yr) + "年減配・今年増配未確認")
+        return {"excluded": True, "reason": str(prev_yr) + "年減配・今年増配未確認", "dy": dy}
 
     rev_g = info.get("revenueGrowth")
     ear_g = info.get("earningsGrowth")
