@@ -210,7 +210,7 @@ def compute_changes(current_df, prev_df):
     """code → {col → {good: bool, prev: str, curr: str, increased: bool}}"""
     if prev_df.empty:
         return {}
-    prev_map = prev_df.set_index("コード").to_dict("index")
+    prev_map = prev_df.drop_duplicates(subset=["コード"]).set_index("コード").to_dict("index")
     changes = {}
     for _, row in current_df.iterrows():
         code = row["コード"]
