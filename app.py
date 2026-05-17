@@ -135,16 +135,27 @@ def get_results(scan_id=None):
                 "score", "スキャン日時", "株主優待", "配当増減歴", "EPS", "_div_trend_json"
             ])
             def _parse_trend(s):
+                """[[year,val],...] または [val,...] どちらにも対応。(values, year_label) を返す"""
                 try:
-                    v = json.loads(s) if s and s != "[]" else []
-                    return v if isinstance(v, list) and len(v) > 0 else []
+                    data = json.loads(s) if s and s != "[]" else []
+                    if not data:
+                        return [], ""
+                    if isinstance(data[0], list):
+                        values = [d[1] for d in data]
+                        y0 = str(data[0][0])[-2:]
+                        y1 = str(data[-1][0])[-2:]
+                        label = f"'{y0}〜'{y1}"
+                        return values, label
+                    else:
+                        return data, ""
                 except Exception:
-                    return []
-            df["配当推移"] = df["_div_trend_json"].apply(_parse_trend)
+                    return [], ""
+            df["配当推移"]   = df["_div_trend_json"].apply(lambda s: _parse_trend(s)[0])
+            df["配当年"]     = df["_div_trend_json"].apply(lambda s: _parse_trend(s)[1])
             df = df.drop(columns=["_div_trend_json"])
             col_order = [
                 "業種", "コード", "銘柄名", "利回り(%)", "配当性向(%)",
-                "自己資本(%)", "時価総額(億)", "配当増減歴", "配当推移", "EPS",
+                "自己資本(%)", "時価総額(億)", "配当増減歴", "配当推移", "配当年", "EPS",
                 "判定", "おすすめ度", "株主優待", "備考",
                 "score", "スキャン日時"
             ]
@@ -533,7 +544,8 @@ else:
     _os_highlighter = make_highlighter(osusume_sorted, _changes, is_osusume=True)
 
     _col_cfg = {
-        "配当推移": st.column_config.LineChartColumn("配当推移(10年)", y_min=0, width="small")
+        "配当推移": st.column_config.LineChartColumn("配当推移", y_min=0, width="small"),
+        "配当年":   st.column_config.TextColumn("期間", width="small"),
     }
 
     tabs = st.tabs(["おすすめ", "全件"] + industries)

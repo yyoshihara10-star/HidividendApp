@@ -235,8 +235,11 @@ def check_dividend_history(ticker):
         annual = divs.resample("YE").sum()
         annual = annual[annual > 0]
 
+        def _annual_data(a):
+            return [[int(a.index[i].year), round(float(a.iloc[i]), 1)] for i in range(len(a))]
+
         if len(annual) < 2:
-            return 0, len(annual), False, "配当履歴" + str(len(annual)) + "年分", annual.tolist()
+            return 0, len(annual), False, "配当履歴" + str(len(annual)) + "年分", _annual_data(annual)
 
         years_checked = len(annual)
         cut_count     = 0
@@ -250,10 +253,15 @@ def check_dividend_history(ticker):
                 cut_years.append(str(annual.index[i].year))
 
         is_increasing = False
-        if len(annual) >= 4:
-            early_avg = annual.iloc[:3].mean()
-            late_avg  = annual.iloc[-3:].mean()
-            if early_avg > 0 and late_avg > early_avg * 1.05:
+        if len(annual) >= 3:
+            # 前半vs後半の平均比較（直近の下落を無視しないため固定3年比較をやめる）
+            mid       = len(annual) // 2
+            early_avg = annual.iloc[:mid].mean()
+            late_avg  = annual.iloc[mid:].mean()
+            trend_up  = early_avg > 0 and late_avg > early_avg * 1.05
+            # 直近年が前年から5%超下落していれば増配傾向とみなさない
+            recent_ok = annual.iloc[-1] >= annual.iloc[-2] * 0.95
+            if trend_up and recent_ok:
                 is_increasing = True
         elif len(annual) >= 2:
             if annual.iloc[-1] > annual.iloc[0] * 1.05:
@@ -265,7 +273,7 @@ def check_dividend_history(ticker):
         if cut_years:
             detail += "/減配:" + ",".join(cut_years)
 
-        return cut_count, years_checked, is_increasing, detail, annual.tolist()
+        return cut_count, years_checked, is_increasing, detail, _annual_data(annual)
 
     except Exception as e:
         return 0, 0, False, "配当履歴取得失敗", []
