@@ -234,6 +234,9 @@ def check_dividend_history(ticker):
 
         annual = divs.resample("YE").sum()
         annual = annual[annual > 0]
+        # 現在年は年途中で不完全（直近の急落に見える）ため除外
+        current_year = pd.Timestamp.now().year
+        annual = annual[annual.index.year < current_year]
 
         def _annual_data(a):
             return [[int(a.index[i].year), round(float(a.iloc[i]), 1)] for i in range(len(a))]
@@ -462,14 +465,14 @@ def _parse_yutai_html(html):
                 if months:
                     month_text = "・".join(dict.fromkeys(months))
 
-            # "最低" は「最低投資金額」にも一致するため除外。株数ラベルのみ対象
-            SHARE_LABELS = ["単元株数", "売買単位", "必要株数", "最低株数", "最低購入株数", "単元"]
-            if not shares_text and any(k in txt for k in SHARE_LABELS):
+            # 株主優待専用ラベルのみ（「単元株数」「売買単位」等の売買単位ラベルは全銘柄に存在するため除外）
+            YUTAI_SHARE_LABELS = ["権利株数", "最低保有株数", "必要保有株数", "保有株数条件",
+                                   "優待最低株数", "受取株数"]
+            if not shares_text and any(k in txt for k in YUTAI_SHARE_LABELS):
                 nums = re.findall(r'[\d,]+', val)
                 if nums:
                     n = int(nums[0].replace(",", ""))
-                    # 投資金額（数万〜数十万）と区別するため上限を10000株に設定
-                    if 1 <= n <= 10000:
+                    if 1 <= n <= 100000:
                         shares_text = f"{n}株以上"
 
     # regex フォールバック: "権利確定月" の直後のみ月を探す（ナビ誤検知防止）
@@ -592,8 +595,8 @@ def analyze(symbol, industry, forced=False):
             return {"excluded": True, "reason": "減配" + str(cut_count) + "回・増配傾向なし", "dy": dy}
     elif cut_count == 1:
         reasons.append("減配歴1回")
-    elif years_checked > 0 and years_checked < 5:
-        reasons.append("配当歴" + str(years_checked) + "年(短期)")
+    if cut_count == 0 and 0 < years_checked < 10:
+        reasons.append("配当歴" + str(years_checked) + "年(10年未満)")
 
     rev_g = info.get("revenueGrowth")
     ear_g = info.get("earningsGrowth")

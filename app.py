@@ -151,13 +151,13 @@ def get_results(scan_id=None):
                 except Exception:
                     return [], ""
             df["配当推移"]   = df["_div_trend_json"].apply(lambda s: _parse_trend(s)[0])
-            df["配当年"]     = df["_div_trend_json"].apply(lambda s: _parse_trend(s)[1])
+            df["_trend_raw"] = df["_div_trend_json"].apply(lambda s: _parse_trend(s)[1])  # 詳細チャート用
             df = df.drop(columns=["_div_trend_json"])
             col_order = [
                 "業種", "コード", "銘柄名", "利回り(%)", "配当性向(%)",
-                "自己資本(%)", "時価総額(億)", "配当増減歴", "配当推移", "配当年", "EPS",
+                "自己資本(%)", "時価総額(億)", "配当増減歴", "配当推移", "EPS",
                 "判定", "おすすめ度", "株主優待", "備考",
-                "score", "スキャン日時"
+                "score", "スキャン日時", "_trend_raw"
             ]
             df = df[col_order]
         else:
@@ -308,16 +308,6 @@ def compute_changes(current_df, prev_df):
         except Exception:
             pass
 
-        # 株主優待 — gained=good, lost=bad
-        try:
-            c_has = _yutai_has(row["株主優待"])
-            p_has = _yutai_has(prev["株主優待"])
-            if c_has != p_has:
-                good = c_has and not p_has
-                code_changes["株主優待"] = {"good": good, "increased": good,
-                                            "prev": str(prev["株主優待"]), "curr": str(row["株主優待"])}
-        except Exception:
-            pass
 
         if code_changes:
             changes[code] = code_changes
@@ -474,7 +464,7 @@ else:
     else:
         filtered_df = filtered_df.sort_values(["利回り(%)", "score"], ascending=[False, False])
 
-    display_df = filtered_df.drop(columns=["score", "スキャン日時"], errors="ignore")
+    display_df = filtered_df.drop(columns=["score", "スキャン日時", "_trend_raw"], errors="ignore")
 
     def apply_search(df, query):
         """クエリに一致する行のみ返す（大文字小文字無視）"""
@@ -545,7 +535,6 @@ else:
 
     _col_cfg = {
         "配当推移": st.column_config.LineChartColumn("配当推移", y_min=0, width="small"),
-        "配当年":   st.column_config.TextColumn("期間", width="small"),
     }
 
     tabs = st.tabs(["おすすめ", "全件"] + industries)
@@ -582,6 +571,24 @@ else:
     st.download_button("CSVダウンロード", csv, f"Hidividend_{dt_str}.csv", "text/csv")
 
     st.divider()
+    with st.expander("📊 配当推移チャート（年ラベル付き）", expanded=False):
+        chart_options = [
+            f"{int(r['コード'])} {r['銘柄名']}"
+            for _, r in filtered_df.iterrows()
+        ]
+        selected_stock = st.selectbox("銘柄を選択", chart_options, key="div_chart_sel")
+        if selected_stock:
+            sel_code = int(selected_stock.split(" ")[0])
+            sel_row  = filtered_df[filtered_df["コード"] == sel_code]
+            if not sel_row.empty:
+                raw = sel_row["_trend_raw"].iloc[0]
+                if isinstance(raw, list) and len(raw) > 0:
+                    chart_df = pd.DataFrame(raw, columns=["年", "配当(円)"])
+                    chart_df["年"] = chart_df["年"].astype(str)
+                    st.bar_chart(chart_df.set_index("年"), use_container_width=True)
+                else:
+                    st.info("配当データがありません（次回スキャン後に反映されます）")
+
     with st.expander("🔍 スクリーニングログ（除外銘柄）", expanded=False):
         log_df = get_scan_log(_current_sid)
         if log_df.empty:
