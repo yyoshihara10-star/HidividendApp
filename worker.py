@@ -3,6 +3,7 @@ import yfinance as yf
 from curl_cffi import requests
 from bs4 import BeautifulSoup
 import re
+import json
 import time
 import random
 import os
@@ -83,6 +84,24 @@ def init_db():
         conn.commit()
     except:
         pass
+    try:
+        c.execute("ALTER TABLE scan_results ADD COLUMN div_trend TEXT")
+        conn.commit()
+    except:
+        pass
+
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS scan_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            scan_id TEXT,
+            scanned_at TEXT,
+            industry TEXT,
+            code INTEGER,
+            name TEXT,
+            reason TEXT,
+            yield_pct REAL
+        )
+    """)
 
     c.execute("""
         CREATE TABLE IF NOT EXISTS scan_status (
@@ -118,8 +137,20 @@ def save_results_batch(rows, scan_id):
     c.executemany("""
         INSERT INTO scan_results
         (scan_id, scanned_at, industry, code, name, yield_pct, payout_pct,
-         equity_pct, mcap_oku, judge, stars, note, score, yutai, div_history, eps_str)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+         equity_pct, mcap_oku, judge, stars, note, score, yutai, div_history, eps_str, div_trend)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    """, rows)
+    conn.commit()
+    conn.close()
+
+def save_log_batch(rows, scan_id):
+    if not rows:
+        return
+    conn = get_db_conn()
+    c = conn.cursor()
+    c.executemany("""
+        INSERT INTO scan_log (scan_id, scanned_at, industry, code, name, reason, yield_pct)
+        VALUES (?,?,?,?,?,?,?)
     """, rows)
     conn.commit()
     conn.close()
@@ -192,20 +223,20 @@ def check_dividend_history(ticker):
     try:
         divs = ticker.dividends
         if divs is None or len(divs) == 0:
-            return 0, 0, False, "配当履歴なし"
+            return 0, 0, False, "配当履歴なし", []
 
         divs.index = divs.index.tz_localize(None) if divs.index.tzinfo else divs.index
         cutoff = pd.Timestamp.now() - pd.DateOffset(years=10)
         divs   = divs[divs.index >= cutoff]
 
         if len(divs) == 0:
-            return 0, 0, False, "配当履歴なし"
+            return 0, 0, False, "配当履歴なし", []
 
         annual = divs.resample("YE").sum()
         annual = annual[annual > 0]
 
         if len(annual) < 2:
-            return 0, len(annual), False, "配当履歴" + str(len(annual)) + "年分"
+            return 0, len(annual), False, "配当履歴" + str(len(annual)) + "年分", annual.tolist()
 
         years_checked = len(annual)
         cut_count     = 0
@@ -234,10 +265,10 @@ def check_dividend_history(ticker):
         if cut_years:
             detail += "/減配:" + ",".join(cut_years)
 
-        return cut_count, years_checked, is_increasing, detail
+        return cut_count, years_checked, is_increasing, detail, annual.tolist()
 
     except Exception as e:
-        return 0, 0, False, "配当履歴取得失敗"
+        return 0, 0, False, "配当履歴取得失敗", []
 
 def make_div_history_str(cut_count, years_checked, is_increasing):
     if years_checked == 0:
@@ -510,22 +541,22 @@ def analyze(symbol, industry, forced=False):
     info, ticker = fetch_info_retry(symbol)
     if info is None:
         print("    reason: info failed")
-        return None
+        return {"excluded": True, "reason": "データ取得失敗", "dy": 0}
 
     price = info.get("currentPrice") or info.get("previousClose") or 0
     if price == 0:
         print("    reason: no price")
-        return None
+        return {"excluded": True, "reason": "株価データなし", "dy": 0}
 
     dy = get_dividend_yield(info, ticker, price)
 
     if dy > 30:
         print("    reason: abnormal yield=" + str(dy))
-        return None
+        return {"excluded": True, "reason": "利回り異常値=" + str(dy) + "%", "dy": dy}
 
     if not forced and dy < MIN_YIELD:
         print("    reason: low yield=" + str(dy))
-        return None
+        return {"excluded": True, "reason": "利回り" + str(dy) + "%<" + str(MIN_YIELD) + "%", "dy": dy}
 
     score   = 5
     reasons = []
@@ -534,8 +565,9 @@ def analyze(symbol, industry, forced=False):
         score -= 1
         reasons.append("利回り" + str(dy) + "%(低め)")
 
-    cut_count, years_checked, is_increasing, div_detail = check_dividend_history(ticker)
+    cut_count, years_checked, is_increasing, div_detail, annual_list = check_dividend_history(ticker)
     div_history = make_div_history_str(cut_count, years_checked, is_increasing)
+    div_trend   = json.dumps(annual_list) if annual_list else "[]"
 
     if cut_count >= 2:
         if is_increasing:
@@ -544,7 +576,7 @@ def analyze(symbol, industry, forced=False):
             print("    div cut " + str(cut_count) + " but increasing trend: include with penalty")
         else:
             print("    reason: div cut " + str(cut_count) + " times no increasing trend")
-            return None
+            return {"excluded": True, "reason": "減配" + str(cut_count) + "回・増配傾向なし", "dy": dy}
     elif cut_count == 1:
         reasons.append("減配歴1回")
     elif years_checked > 0 and years_checked < 5:
@@ -570,13 +602,13 @@ def analyze(symbol, industry, forced=False):
     payout = get_payout_ratio(info, ticker)
     if payout == 0:
         print("    reason: payout cannot be calculated")
-        return None
+        return {"excluded": True, "reason": "配当性向計算不可(EPS不明)", "dy": dy}
 
     if payout > 70:
         ok, note = check_payout_recovery(info)
         if not ok:
             print("    reason: payout=" + str(round(payout)) + "% no recovery")
-            return None
+            return {"excluded": True, "reason": "配当性向" + str(round(payout)) + "%・回復見込みなし", "dy": dy}
         score -= 1
         reasons.append("配当性向" + str(round(payout)) + "%(一時的)")
         reasons.append(note)
@@ -597,6 +629,7 @@ def analyze(symbol, industry, forced=False):
     yutai = get_yutai(code4)
 
     return {
+        "excluded":    False,
         "dy":          dy,
         "payout":      round(payout, 1),
         "eq":          eq_ratio,
@@ -609,10 +642,12 @@ def analyze(symbol, industry, forced=False):
         "yutai":       yutai,
         "div_history": div_history,
         "eps_str":     eps_str,
+        "div_trend":   div_trend,
     }
 
 def scan_sector(rows, industry, col_map, forced=False):
     candidates = []
+    exclusions = []
     for _, row in rows.iterrows():
         raw    = str(row[col_map["code"]]).strip()
         digits = "".join(filter(str.isdigit, raw))
@@ -623,14 +658,22 @@ def scan_sector(rows, industry, col_map, forced=False):
         name   = row[col_map["name"]]
         print("  checking " + symbol + " " + name)
         res = analyze(symbol, industry, forced)
-        if res:
+        if res is None:
+            excl = {"code": int(code4), "name": name, "industry": industry,
+                    "reason": "データ取得失敗", "dy": 0}
+            exclusions.append(excl)
+        elif res.get("excluded"):
+            res["code"]     = int(code4)
+            res["name"]     = name
+            res["industry"] = industry
+            exclusions.append(res)
+            print("  -> excluded: " + symbol + " " + name + " / " + res.get("reason", ""))
+        else:
             res["industry"] = industry
             res["code"]     = int(code4)
             res["name"]     = name
             candidates.append(res)
-        else:
-            print("  -> excluded: " + symbol + " " + name)
-    return candidates
+    return candidates, exclusions
 
 def main():
     started_at = now_jst()
@@ -694,42 +737,51 @@ def main():
         sector_df = non_shosha_df[non_shosha_df[col_map["industry"]] == industry]
         targets   = get_sector_targets(sector_df, col_map)
 
-        candidates = scan_sector(targets, industry, col_map, forced=False)
+        candidates, excls = scan_sector(targets, industry, col_map, forced=False)
         if not candidates:
-            candidates = scan_sector(targets, industry, col_map, forced=True)
+            candidates, excls = scan_sector(targets, industry, col_map, forced=True)
 
+        now = now_jst()
         if candidates:
             passed_stocks = sorted(candidates, key=lambda x: (x["dy"], x["score"]), reverse=True)
-            now  = now_jst()
             new_rows = []
             for r in passed_stocks:
                 new_rows.append((
                     scan_id, now, r["industry"], r["code"], r["name"],
                     r["dy"], r["payout"], r["eq"], r["mcap"],
                     r["judge"], r["stars"], r["note"], r["score"], r.get("yutai", "-"),
-                    r.get("div_history", "-"), r.get("eps_str", "-")
+                    r.get("div_history", "-"), r.get("eps_str", "-"), r.get("div_trend", "[]")
                 ))
             save_results_batch(new_rows, scan_id)
             total_count += len(new_rows)
 
+        if excls:
+            log_rows = [(scan_id, now, e["industry"], e["code"], e["name"],
+                         e.get("reason", "不明"), e.get("dy", 0)) for e in excls]
+            save_log_batch(log_rows, scan_id)
+
     print("scanning shosha...")
     set_status("current", "商社(総合商社)")
     shosha_targets = get_sector_targets(shosha_df, col_map)
-    shosha_cand = scan_sector(shosha_targets, "商社", col_map, forced=False)
+    shosha_cand, shosha_excls = scan_sector(shosha_targets, "商社", col_map, forced=False)
     if not shosha_cand:
-        shosha_cand = scan_sector(shosha_targets, "商社", col_map, forced=True)
+        shosha_cand, shosha_excls = scan_sector(shosha_targets, "商社", col_map, forced=True)
+    now = now_jst()
     if shosha_cand:
-        now = now_jst()
         shosha_rows = []
         for r in sorted(shosha_cand, key=lambda x: (x["dy"], x["score"]), reverse=True):
             shosha_rows.append((
                 scan_id, now, r["industry"], r["code"], r["name"],
                 r["dy"], r["payout"], r["eq"], r["mcap"],
                 r["judge"], r["stars"], r["note"], r["score"], r.get("yutai", "-"),
-                r.get("div_history", "-"), r.get("eps_str", "-")
+                r.get("div_history", "-"), r.get("eps_str", "-"), r.get("div_trend", "[]")
             ))
         save_results_batch(shosha_rows, scan_id)
         total_count += len(shosha_rows)
+    if shosha_excls:
+        log_rows = [(scan_id, now, e["industry"], e["code"], e["name"],
+                     e.get("reason", "不明"), e.get("dy", 0)) for e in shosha_excls]
+        save_log_batch(log_rows, scan_id)
 
     finished_at = now_jst()
     set_status("state",    "done")

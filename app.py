@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import requests
+import json
 import os
 from datetime import datetime
 import time
@@ -121,7 +122,8 @@ def get_results(scan_id=None):
                     score, scanned_at,
                     COALESCE(yutai, '-') as yutai,
                     COALESCE(div_history, '-') as div_history,
-                    COALESCE(eps_str, '-') as eps_str
+                    COALESCE(eps_str, '-') as eps_str,
+                    COALESCE(div_trend, '[]') as div_trend
                 FROM scan_results
                 WHERE scan_id = ?
                 ORDER BY yield_pct DESC, score DESC
@@ -130,11 +132,19 @@ def get_results(scan_id=None):
             df = pd.DataFrame(rows, columns=[
                 "業種", "コード", "銘柄名", "利回り(%)", "配当性向(%)",
                 "自己資本(%)", "時価総額(億)", "判定", "おすすめ度", "備考",
-                "score", "スキャン日時", "株主優待", "配当増減歴", "EPS"
+                "score", "スキャン日時", "株主優待", "配当増減歴", "EPS", "_div_trend_json"
             ])
+            def _parse_trend(s):
+                try:
+                    v = json.loads(s) if s and s != "[]" else []
+                    return v if isinstance(v, list) and len(v) > 0 else []
+                except Exception:
+                    return []
+            df["配当推移"] = df["_div_trend_json"].apply(_parse_trend)
+            df = df.drop(columns=["_div_trend_json"])
             col_order = [
                 "業種", "コード", "銘柄名", "利回り(%)", "配当性向(%)",
-                "自己資本(%)", "時価総額(億)", "配当増減歴", "EPS",
+                "自己資本(%)", "時価総額(億)", "配当増減歴", "配当推移", "EPS",
                 "判定", "おすすめ度", "株主優待", "備考",
                 "score", "スキャン日時"
             ]
@@ -176,6 +186,22 @@ def get_prev_results(current_scan_id):
             "コード", "利回り(%)", "配当性向(%)", "自己資本(%)",
             "配当増減歴", "EPS", "株主優待"
         ])
+    except Exception:
+        return pd.DataFrame()
+
+def get_scan_log(scan_id):
+    try:
+        conn = get_db_conn()
+        c = conn.cursor()
+        c.execute("""
+            SELECT industry, code, name, reason, yield_pct
+            FROM scan_log
+            WHERE scan_id = ?
+            ORDER BY industry, code
+        """, (scan_id,))
+        rows = c.fetchall()
+        conn.close()
+        return pd.DataFrame(rows, columns=["業種", "コード", "銘柄名", "除外理由", "利回り(%)"])
     except Exception:
         return pd.DataFrame()
 
@@ -461,7 +487,10 @@ else:
             code = row["コード"]
             score_val = df_orig.loc[df_orig["コード"] == code, "score"].values
             yield_val = df_orig.loc[df_orig["コード"] == code, "利回り(%)"].values
-            if len(score_val) > 0 and score_val[0] == 5 and len(yield_val) > 0 and yield_val[0] >= 3.5:
+            note_val  = df_orig.loc[df_orig["コード"] == code, "備考"].values
+            has_cut = len(note_val) > 0 and "減配歴" in str(note_val[0])
+            if (len(score_val) > 0 and score_val[0] == 5 and
+                    len(yield_val) > 0 and yield_val[0] >= 3.5 and not has_cut):
                 res.at[idx, "備考"] = "★" + str(row["備考"])
         return res
 
@@ -503,6 +532,10 @@ else:
     osusume_with_changes = apply_changes_to_display(osusume_starred, _changes)
     _os_highlighter = make_highlighter(osusume_sorted, _changes, is_osusume=True)
 
+    _col_cfg = {
+        "配当推移": st.column_config.LineChartColumn("配当推移(10年)", y_min=0, width="small")
+    }
+
     tabs = st.tabs(["おすすめ", "全件"] + industries)
 
     with tabs[0]:
@@ -510,11 +543,13 @@ else:
         if _os.empty:
             st.info("おすすめ条件（利回り3.5%以上・おすすめ度★★★★以上）に該当する銘柄はありません。")
         else:
-            st.dataframe(_os.style.apply(_os_highlighter, axis=1), use_container_width=True)
+            st.dataframe(_os.style.apply(_os_highlighter, axis=1),
+                         column_config=_col_cfg, use_container_width=True)
 
     with tabs[1]:
         _all = with_1idx(apply_search(starred_with_changes, search_query))
-        st.dataframe(_all.style.apply(_highlighter, axis=1), use_container_width=True)
+        st.dataframe(_all.style.apply(_highlighter, axis=1),
+                     column_config=_col_cfg, use_container_width=True)
 
     for tab, ind in zip(tabs[2:], industries):
         with tab:
@@ -523,7 +558,8 @@ else:
                 starred_with_changes[starred_with_changes["業種"] == ind], search_query
             ))
             _ind_hl = make_highlighter(ind_src, _changes)
-            st.dataframe(ind_disp.style.apply(_ind_hl, axis=1), use_container_width=True)
+            st.dataframe(ind_disp.style.apply(_ind_hl, axis=1),
+                         column_config=_col_cfg, use_container_width=True)
 
     try:
         dt_str = datetime.strptime(scanned_at, "%Y-%m-%d %H:%M:%S").strftime("%Y%m%d_%H%M%S")
@@ -532,6 +568,26 @@ else:
 
     csv = starred_with_changes.to_csv(index=False).encode("utf-8-sig")
     st.download_button("CSVダウンロード", csv, f"Hidividend_{dt_str}.csv", "text/csv")
+
+    st.divider()
+    with st.expander("🔍 スクリーニングログ（除外銘柄）", expanded=False):
+        log_df = get_scan_log(_current_sid)
+        if log_df.empty:
+            st.info("ログデータがありません（次回スキャン後から記録されます）")
+        else:
+            log_search = st.text_input(
+                "ログ検索",
+                placeholder="銘柄名・コード・業種・除外理由など...",
+                key="log_search"
+            )
+            disp_log = log_df
+            if log_search.strip():
+                disp_log = log_df[log_df.apply(
+                    lambda r: r.astype(str).str.contains(log_search.strip(), case=False, na=False).any(),
+                    axis=1
+                )]
+            st.caption(f"除外銘柄: {len(disp_log)} / {len(log_df)} 件")
+            st.dataframe(disp_log.reset_index(drop=True), use_container_width=True)
 
 st.divider()
 st.subheader("過去の履歴")
