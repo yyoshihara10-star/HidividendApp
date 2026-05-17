@@ -150,8 +150,14 @@ def get_results(scan_id=None):
                         return data, ""
                 except Exception:
                     return [], ""
+            def _extract_raw(s):
+                try:
+                    data = json.loads(s) if s and s != "[]" else []
+                    return data if data and isinstance(data[0], list) else []
+                except Exception:
+                    return []
             df["配当推移"]   = df["_div_trend_json"].apply(lambda s: _parse_trend(s)[0])
-            df["_trend_raw"] = df["_div_trend_json"].apply(lambda s: _parse_trend(s)[1])  # 詳細チャート用
+            df["_trend_raw"] = df["_div_trend_json"].apply(_extract_raw)  # [[year,value],...] 詳細チャート用
             df = df.drop(columns=["_div_trend_json"])
             col_order = [
                 "業種", "コード", "銘柄名", "利回り(%)", "配当性向(%)",
@@ -528,7 +534,7 @@ else:
     osusume_sorted = osusume_src.sort_values(
         ["利回り(%)", "score", "_yr"], ascending=[False, False, False]
     )
-    osusume_disp = osusume_sorted.drop(columns=["score", "スキャン日時", "_yr"], errors="ignore")
+    osusume_disp = osusume_sorted.drop(columns=["score", "スキャン日時", "_yr", "_trend_raw"], errors="ignore")
     osusume_starred = add_star_to_best(osusume_sorted, osusume_disp)
     osusume_with_changes = apply_changes_to_display(osusume_starred, _changes)
     _os_highlighter = make_highlighter(osusume_sorted, _changes, is_osusume=True)
