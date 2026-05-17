@@ -119,7 +119,9 @@ def get_results(scan_id=None):
                     industry, code, name, yield_pct, payout_pct,
                     equity_pct, mcap_oku, judge, stars, note,
                     score, scanned_at,
-                    COALESCE(yutai, '-') as yutai
+                    COALESCE(yutai, '-') as yutai,
+                    COALESCE(div_history, '-') as div_history,
+                    COALESCE(eps_str, '-') as eps_str
                 FROM scan_results
                 WHERE scan_id = ?
                 ORDER BY yield_pct DESC, score DESC
@@ -128,16 +130,208 @@ def get_results(scan_id=None):
             df = pd.DataFrame(rows, columns=[
                 "業種", "コード", "銘柄名", "利回り(%)", "配当性向(%)",
                 "自己資本(%)", "時価総額(億)", "判定", "おすすめ度", "備考",
-                "score", "スキャン日時", "株主優待"
+                "score", "スキャン日時", "株主優待", "配当増減歴", "EPS"
             ])
+            col_order = [
+                "業種", "コード", "銘柄名", "利回り(%)", "配当性向(%)",
+                "自己資本(%)", "時価総額(億)", "配当増減歴", "EPS",
+                "判定", "おすすめ度", "株主優待", "備考",
+                "score", "スキャン日時"
+            ]
+            df = df[col_order]
         else:
             df = pd.DataFrame()
         conn.close()
         return df
-    # ★ エラーを握りつぶさず、画面に出すようにしました！
     except Exception as e:
         st.error(f"データベースから結果を取得中にエラーが発生しました: {e}")
         return pd.DataFrame()
+
+def get_prev_results(current_scan_id):
+    """直前スキャンの結果を取得（変化トラッキング用）"""
+    try:
+        conn = get_db_conn()
+        c = conn.cursor()
+        c.execute("""
+            SELECT DISTINCT scan_id FROM scan_results
+            WHERE scan_id != ?
+            ORDER BY scan_id DESC LIMIT 1
+        """, (current_scan_id,))
+        row = c.fetchone()
+        if not row:
+            conn.close()
+            return pd.DataFrame()
+        prev_id = row[0]
+        c.execute("""
+            SELECT code,
+                   yield_pct, payout_pct, equity_pct,
+                   COALESCE(div_history, '-') as div_history,
+                   COALESCE(eps_str, '-') as eps_str,
+                   COALESCE(yutai, '-') as yutai
+            FROM scan_results WHERE scan_id = ?
+        """, (prev_id,))
+        rows = c.fetchall()
+        conn.close()
+        return pd.DataFrame(rows, columns=[
+            "コード", "利回り(%)", "配当性向(%)", "自己資本(%)",
+            "配当増減歴", "EPS", "株主優待"
+        ])
+    except Exception:
+        return pd.DataFrame()
+
+import re as _re
+
+def _div_history_score(s):
+    if not isinstance(s, str) or s in ("-", ""):
+        return 0
+    if "👑" in s:
+        m = _re.search(r'(\d+)', s)
+        return int(m.group(1)) + 100 if m else 100
+    m = _re.search(r'(\d+)年連続', s)
+    if m:
+        return int(m.group(1))
+    m = _re.search(r'減配(\d+)回', s)
+    if m:
+        return -int(m.group(1))
+    return 0
+
+def _eps_trailing(s):
+    if not isinstance(s, str) or s in ("-", ""):
+        return None
+    m = _re.search(r'([\d.]+)', s)
+    return float(m.group(1)) if m else None
+
+def _yutai_has(s):
+    if not isinstance(s, str) or s in ("-", "なし", ""):
+        return False
+    return True
+
+def compute_changes(current_df, prev_df):
+    """code → {col → {good: bool, prev: str, curr: str, increased: bool}}"""
+    if prev_df.empty:
+        return {}
+    prev_map = prev_df.set_index("コード").to_dict("index")
+    changes = {}
+    for _, row in current_df.iterrows():
+        code = row["コード"]
+        if code not in prev_map:
+            continue
+        prev = prev_map[code]
+        code_changes = {}
+
+        # 利回り(%) — up=good
+        try:
+            c_v, p_v = float(row["利回り(%)"]), float(prev["利回り(%)"])
+            if abs(c_v - p_v) >= 0.05:
+                inc = c_v > p_v
+                code_changes["利回り(%)"] = {"good": inc, "increased": inc,
+                                              "prev": f"{p_v:.2f}%", "curr": f"{c_v:.2f}%"}
+        except Exception:
+            pass
+
+        # 配当性向(%) — down=good
+        try:
+            c_v, p_v = float(row["配当性向(%)"]), float(prev["配当性向(%)"])
+            if abs(c_v - p_v) >= 1.0:
+                inc = c_v > p_v
+                code_changes["配当性向(%)"] = {"good": not inc, "increased": inc,
+                                                "prev": f"{p_v:.1f}%", "curr": f"{c_v:.1f}%"}
+        except Exception:
+            pass
+
+        # 自己資本(%) — up=good
+        try:
+            c_v, p_v = float(row["自己資本(%)"]), float(prev["自己資本(%)"])
+            if abs(c_v - p_v) >= 1.0:
+                inc = c_v > p_v
+                code_changes["自己資本(%)"] = {"good": inc, "increased": inc,
+                                                "prev": f"{p_v:.1f}%", "curr": f"{c_v:.1f}%"}
+        except Exception:
+            pass
+
+        # 配当増減歴 — higher score=good
+        try:
+            c_s = _div_history_score(row["配当増減歴"])
+            p_s = _div_history_score(prev["配当増減歴"])
+            if c_s != p_s:
+                good = c_s > p_s
+                code_changes["配当増減歴"] = {"good": good, "increased": good,
+                                              "prev": str(prev["配当増減歴"]), "curr": str(row["配当増減歴"])}
+        except Exception:
+            pass
+
+        # EPS — trailing up=good
+        try:
+            c_t = _eps_trailing(row["EPS"])
+            p_t = _eps_trailing(prev["EPS"])
+            if c_t is not None and p_t is not None and abs(c_t - p_t) >= 1.0:
+                good = c_t > p_t
+                code_changes["EPS"] = {"good": good, "increased": good,
+                                       "prev": str(prev["EPS"]), "curr": str(row["EPS"])}
+        except Exception:
+            pass
+
+        # 株主優待 — gained=good, lost=bad
+        try:
+            c_has = _yutai_has(row["株主優待"])
+            p_has = _yutai_has(prev["株主優待"])
+            if c_has != p_has:
+                good = c_has and not p_has
+                code_changes["株主優待"] = {"good": good, "increased": good,
+                                            "prev": str(prev["株主優待"]), "curr": str(row["株主優待"])}
+        except Exception:
+            pass
+
+        if code_changes:
+            changes[code] = code_changes
+    return changes
+
+def apply_changes_to_display(display_df, changes):
+    """セル値に前回比を付記したDataFrameを返す"""
+    df = display_df.copy()
+    for idx, row in df.iterrows():
+        code = row["コード"]
+        if code not in changes:
+            continue
+        for col, info in changes[code].items():
+            if col not in df.columns:
+                continue
+            arrow = "↑" if info["increased"] else "↓"
+            df.at[idx, col] = f"{row[col]}({arrow}前:{info['prev']})"
+    return df
+
+def make_highlighter(filtered_df, changes, is_osusume=False):
+    """highlight_best/osusume + 変化セル着色を合成したrow-level styler"""
+    src = filtered_df
+    def highlight(row):
+        code = row["コード"]
+        orig = src[src["コード"] == code]
+        if orig.empty:
+            return [""] * len(row)
+        yield_val = float(orig["利回り(%)"].iloc[0])
+        score_val = int(orig["score"].iloc[0])
+
+        if yield_val < 3.0:
+            return ["background-color: #e0e0e0; color: #888888"] * len(row)
+
+        is_yellow = score_val == 5 and yield_val >= 3.5
+        base_bg = "background-color: #fff9c4; font-weight: bold" if is_yellow else ""
+
+        styles = [base_bg] * len(row)
+
+        if code in changes:
+            for ci, col in enumerate(row.index):
+                if col in changes[code]:
+                    info = changes[code][col]
+                    text_col = "color: #1565c0" if info["good"] else "color: #c62828"
+                    existing = styles[ci]
+                    if existing:
+                        styles[ci] = existing + "; " + text_col
+                    else:
+                        styles[ci] = text_col
+
+        return styles
+    return highlight
 
 def delete_scan(scan_id):
     try:
@@ -204,7 +398,9 @@ if status_data.get("state") == "running":
 
 st.divider()
 
-df = get_results(selected_scan_id)
+_current_sid = selected_scan_id if selected_scan_id else get_latest_scan_id()
+df = get_results(_current_sid)
+_prev_df = get_prev_results(_current_sid) if _current_sid else pd.DataFrame()
 
 if df.empty:
     st.info("まだスキャン結果がありません。上の「スキャンを開始」ボタンを押すか、自動スキャンの完了をお待ちください。")
@@ -271,17 +467,15 @@ else:
 
     starred_df = add_star_to_best(filtered_df, display_df)
 
-    def highlight_best(row):
-        if row["利回り(%)"] < 3.0:
-            return ["background-color: #e0e0e0; color: #888888"] * len(row)
-        score_val = filtered_df.loc[filtered_df["コード"] == row["コード"], "score"].values
-        if len(score_val) > 0 and score_val[0] == 5 and row["利回り(%)"] >= 3.5:
-            return ["background-color: #fff9c4; font-weight: bold"] * len(row)
-        return [""] * len(row)
+    # 変化トラッキング
+    _changes = compute_changes(filtered_df, _prev_df)
+    starred_with_changes = apply_changes_to_display(starred_df, _changes)
+    _highlighter = make_highlighter(filtered_df, _changes)
 
-    disp_id = selected_scan_id if selected_scan_id else get_latest_scan_id()
+    disp_id = _current_sid
     st.subheader(f"スクリーニング結果 {len(display_df)} 銘柄  ({disp_id})")
-    st.caption("黄色ハイライト・備考欄★ = 利回り3.5%以上かつおすすめ度★★★★★")
+    change_note = "青=前回比良化 / 赤=前回比悪化" if _changes else "前回スキャンなし（変化比較不可）"
+    st.caption(f"黄色ハイライト・備考欄★ = 利回り3.5%以上かつおすすめ度★★★★★　|　{change_note}")
 
     industries = filtered_df["業種"].unique().tolist()
     if "商社" in industries:
@@ -306,50 +500,37 @@ else:
     )
     osusume_disp = osusume_sorted.drop(columns=["score", "スキャン日時", "_yr"], errors="ignore")
     osusume_starred = add_star_to_best(osusume_sorted, osusume_disp)
-
-    def highlight_osusume(row):
-        if row["利回り(%)"] < 3.0:
-            return ["background-color: #e0e0e0; color: #888888"] * len(row)
-        sv = osusume_sorted.loc[osusume_sorted["コード"] == row["コード"], "score"].values
-        if len(sv) > 0 and sv[0] == 5 and row["利回り(%)"] >= 3.5:
-            return ["background-color: #fff9c4; font-weight: bold"] * len(row)
-        return [""] * len(row)
+    osusume_with_changes = apply_changes_to_display(osusume_starred, _changes)
+    _os_highlighter = make_highlighter(osusume_sorted, _changes, is_osusume=True)
 
     tabs = st.tabs(["おすすめ", "全件"] + industries)
 
     with tabs[0]:
-        _os = with_1idx(apply_search(osusume_starred, search_query))
+        _os = with_1idx(apply_search(osusume_with_changes, search_query))
         if _os.empty:
             st.info("おすすめ条件（利回り3.5%以上・おすすめ度★★★★以上）に該当する銘柄はありません。")
         else:
-            st.dataframe(_os.style.apply(highlight_osusume, axis=1), use_container_width=True)
+            st.dataframe(_os.style.apply(_os_highlighter, axis=1), use_container_width=True)
 
     with tabs[1]:
-        _all = with_1idx(apply_search(starred_df, search_query))
-        st.dataframe(_all.style.apply(highlight_best, axis=1), use_container_width=True)
+        _all = with_1idx(apply_search(starred_with_changes, search_query))
+        st.dataframe(_all.style.apply(_highlighter, axis=1), use_container_width=True)
 
     for tab, ind in zip(tabs[2:], industries):
         with tab:
-            ind_df = with_1idx(apply_search(
-                starred_df[starred_df["業種"] == ind], search_query
+            ind_src = filtered_df[filtered_df["業種"] == ind]
+            ind_disp = with_1idx(apply_search(
+                starred_with_changes[starred_with_changes["業種"] == ind], search_query
             ))
-            def highlight_ind(row, i=ind):
-                if row["利回り(%)"] < 3.0:
-                    return ["background-color: #e0e0e0; color: #888888"] * len(row)
-                score_val = filtered_df.loc[
-                    (filtered_df["業種"] == i) & (filtered_df["コード"] == row["コード"]), "score"
-                ].values
-                if len(score_val) > 0 and score_val[0] == 5 and row["利回り(%)"] >= 3.5:
-                    return ["background-color: #fff9c4; font-weight: bold"] * len(row)
-                return [""] * len(row)
-            st.dataframe(ind_df.style.apply(highlight_ind, axis=1), use_container_width=True)
+            _ind_hl = make_highlighter(ind_src, _changes)
+            st.dataframe(ind_disp.style.apply(_ind_hl, axis=1), use_container_width=True)
 
     try:
         dt_str = datetime.strptime(scanned_at, "%Y-%m-%d %H:%M:%S").strftime("%Y%m%d_%H%M%S")
     except:
         dt_str = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-    csv = starred_df.to_csv(index=False).encode("utf-8-sig")
+    csv = starred_with_changes.to_csv(index=False).encode("utf-8-sig")
     st.download_button("CSVダウンロード", csv, f"Hidividend_{dt_str}.csv", "text/csv")
 
 st.divider()

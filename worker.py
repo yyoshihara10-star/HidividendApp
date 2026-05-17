@@ -73,6 +73,16 @@ def init_db():
         conn.commit()
     except:
         pass
+    try:
+        c.execute("ALTER TABLE scan_results ADD COLUMN div_history TEXT")
+        conn.commit()
+    except:
+        pass
+    try:
+        c.execute("ALTER TABLE scan_results ADD COLUMN eps_str TEXT")
+        conn.commit()
+    except:
+        pass
 
     c.execute("""
         CREATE TABLE IF NOT EXISTS scan_status (
@@ -108,8 +118,8 @@ def save_results_batch(rows, scan_id):
     c.executemany("""
         INSERT INTO scan_results
         (scan_id, scanned_at, industry, code, name, yield_pct, payout_pct,
-         equity_pct, mcap_oku, judge, stars, note, score, yutai)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+         equity_pct, mcap_oku, judge, stars, note, score, yutai, div_history, eps_str)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
     """, rows)
     conn.commit()
     conn.close()
@@ -228,6 +238,29 @@ def check_dividend_history(ticker):
 
     except Exception as e:
         return 0, 0, False, "配当履歴取得失敗"
+
+def make_div_history_str(cut_count, years_checked, is_increasing):
+    if years_checked == 0:
+        return "-"
+    if cut_count == 0:
+        if years_checked >= 10:
+            return "👑" + str(years_checked) + "年連続"
+        return str(years_checked) + "年連続"
+    elif cut_count == 1:
+        return "減配1回(増配傾向)" if is_increasing else "減配1回"
+    else:
+        return "減配" + str(cut_count) + "回(増配傾向)" if is_increasing else "減配" + str(cut_count) + "回"
+
+def make_eps_str(t_eps, f_eps):
+    if t_eps and t_eps != 0:
+        t_r = round(t_eps, 1)
+        if f_eps and f_eps != 0:
+            f_r = round(f_eps, 1)
+            g = round((f_eps - t_eps) / abs(t_eps) * 100, 1)
+            prefix = "+" if g >= 0 else ""
+            return str(t_r) + "→" + str(f_r) + "円(" + prefix + str(g) + "%)"
+        return str(t_r) + "円(予想なし)"
+    return "-"
 
 def get_payout_ratio(info, ticker):
     f_eps = info.get("forwardEps")
@@ -502,20 +535,20 @@ def analyze(symbol, industry, forced=False):
         reasons.append("利回り" + str(dy) + "%(低め)")
 
     cut_count, years_checked, is_increasing, div_detail = check_dividend_history(ticker)
+    div_history = make_div_history_str(cut_count, years_checked, is_increasing)
 
     if cut_count >= 2:
         if is_increasing:
             score -= 2
-            reasons.append("減配歴" + str(cut_count) + "回(" + div_detail + "/増加傾向のため継続)")
+            reasons.append("減配歴" + str(cut_count) + "回(増配傾向継続)")
             print("    div cut " + str(cut_count) + " but increasing trend: include with penalty")
         else:
             print("    reason: div cut " + str(cut_count) + " times no increasing trend")
             return None
     elif cut_count == 1:
-        reasons.append("減配歴1回(" + div_detail + ")")
-    else:
-        if years_checked > 0:
-            reasons.append(div_detail)
+        reasons.append("減配歴1回")
+    elif years_checked > 0 and years_checked < 5:
+        reasons.append("配当歴" + str(years_checked) + "年(短期)")
 
     rev_g = info.get("revenueGrowth")
     ear_g = info.get("earningsGrowth")
@@ -532,12 +565,7 @@ def analyze(symbol, industry, forced=False):
 
     t_eps = info.get("trailingEps")
     f_eps = info.get("forwardEps")
-    if t_eps and f_eps and t_eps != 0:
-        eps_growth = round((f_eps - t_eps) / abs(t_eps) * 100, 1)
-        prefix = "+" if eps_growth >= 0 else ""
-        reasons.append("EPS:" + str(round(t_eps, 1)) + "->" + str(round(f_eps, 1)) + "円(" + prefix + str(eps_growth) + "%)")
-    elif t_eps:
-        reasons.append("EPS:" + str(round(t_eps, 1)) + "円(予想データなし)")
+    eps_str = make_eps_str(t_eps, f_eps)
 
     payout = get_payout_ratio(info, ticker)
     if payout == 0:
@@ -569,16 +597,18 @@ def analyze(symbol, industry, forced=False):
     yutai = get_yutai(code4)
 
     return {
-        "dy":    dy,
-        "payout": round(payout, 1),
-        "eq":    eq_ratio,
-        "mcap":  round(m_cap / 100000000) if m_cap else 0,
-        "judge": judge,
-        "stars": "★" * star + "☆" * (5 - star),
-        "note":  " / ".join(reasons) if reasons else "良好(指標クリア)",
-        "score": star,
-        "m_cap": m_cap,
-        "yutai": yutai,
+        "dy":          dy,
+        "payout":      round(payout, 1),
+        "eq":          eq_ratio,
+        "mcap":        round(m_cap / 100000000) if m_cap else 0,
+        "judge":       judge,
+        "stars":       "★" * star + "☆" * (5 - star),
+        "note":        " / ".join(reasons) if reasons else "良好(指標クリア)",
+        "score":       star,
+        "m_cap":       m_cap,
+        "yutai":       yutai,
+        "div_history": div_history,
+        "eps_str":     eps_str,
     }
 
 def scan_sector(rows, industry, col_map, forced=False):
@@ -676,7 +706,8 @@ def main():
                 new_rows.append((
                     scan_id, now, r["industry"], r["code"], r["name"],
                     r["dy"], r["payout"], r["eq"], r["mcap"],
-                    r["judge"], r["stars"], r["note"], r["score"], r.get("yutai", "-")
+                    r["judge"], r["stars"], r["note"], r["score"], r.get("yutai", "-"),
+                    r.get("div_history", "-"), r.get("eps_str", "-")
                 ))
             save_results_batch(new_rows, scan_id)
             total_count += len(new_rows)
@@ -694,7 +725,8 @@ def main():
             shosha_rows.append((
                 scan_id, now, r["industry"], r["code"], r["name"],
                 r["dy"], r["payout"], r["eq"], r["mcap"],
-                r["judge"], r["stars"], r["note"], r["score"], r.get("yutai", "-")
+                r["judge"], r["stars"], r["note"], r["score"], r.get("yutai", "-"),
+                r.get("div_history", "-"), r.get("eps_str", "-")
             ))
         save_results_batch(shosha_rows, scan_id)
         total_count += len(shosha_rows)
