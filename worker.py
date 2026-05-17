@@ -233,7 +233,14 @@ def get_payout_ratio(info, ticker):
     f_eps = info.get("forwardEps")
     t_eps = info.get("trailingEps")
 
-    eps = f_eps if (f_eps is not None and f_eps > 0) else t_eps
+    # trailingEps（実績値）を優先。forwardEpsを先に使うと
+    # 直近赤字等の銘柄で配当性向が低く見えてしまう。
+    if t_eps is not None and t_eps > 0:
+        eps = t_eps
+    elif f_eps is not None and f_eps > 0:
+        eps = f_eps
+    else:
+        return 0
 
     if eps is None or eps <= 0:
         return 0
@@ -355,7 +362,11 @@ def get_dividend_yield(info, ticker, price):
     return 0.0
 
 def _parse_yutai_html(html):
-    """HTML から (shares_text, month_text) を抽出"""
+    """
+    HTML から (shares_text, month_text) を抽出。
+    構造化データ（th/td, dt/dd）のみを対象とし、
+    ナビゲーション等の汎用テキストに引っかからないよう厳格に判定する。
+    """
     soup = BeautifulSoup(html, "html.parser")
     month_text = ""
     shares_text = ""
@@ -364,7 +375,6 @@ def _parse_yutai_html(html):
     for label_tag, value_tag in [("th", "td"), ("dt", "dd")]:
         for label in soup.find_all(label_tag):
             txt = label.get_text(strip=True)
-            # 値要素: 同行の兄弟 or 次行の td
             val_el = label.find_next_sibling(value_tag)
             if val_el is None:
                 parent = label.parent
@@ -387,17 +397,15 @@ def _parse_yutai_html(html):
                     if 1 <= n <= 1000000:
                         shares_text = f"{n}株以上"
 
-    # regex フォールバック（HTMLテキスト全体）
+    # regex フォールバック: "権利確定月" の直後のみ月を探す（ナビ誤検知防止）
     if not month_text:
         m = re.search(r'権利確定月[^月\d]{0,20}(\d+)月', html)
         if m:
             month_text = m.group(1) + "月"
 
+    # 株数は "1単元(100株)" という明示的パターンのみ（"〇〇株以上" は広すぎて誤検知）
     if not shares_text:
-        # "100株以上" "100株から" "1単元(100株)" など
-        m = re.search(r'(\d[\d,]*)\s*株(?:以上|から|～)', html)
-        if not m:
-            m = re.search(r'1単元[（(](\d[\d,]*)株[）)]', html)
+        m = re.search(r'1単元[（(](\d[\d,]*)株[）)]', html)
         if m:
             n = int(m.group(1).replace(",", ""))
             if 1 <= n <= 1000000:
@@ -407,7 +415,13 @@ def _parse_yutai_html(html):
 
 
 def get_yutai(code4):
-    """株主優待情報を取得。kabutan.jp → minkabu.jp の順で試みる"""
+    """
+    株主優待情報を取得。kabutan.jp → minkabu.jp の順で試みる。
+    - 明示的に「なし」と確認できた場合のみ「なし」を返す
+    - パース成功時は「XXX株以上 / X月」形式
+    - 判定できなかった場合は「-」（不明）を返す
+    ※ 「優待」「権利」がページ内に存在するだけでは「あり」と判定しない
+    """
     NO_YUTAI = [
         "株主優待は実施していません",
         "株主優待制度はございません",
@@ -415,6 +429,10 @@ def get_yutai(code4):
         "株主優待はありません",
         "株主優待情報はありません",
         "この企業には株主優待の情報がありません",
+        "株主優待の設定はありません",
+        "優待制度を実施しておりません",
+        "優待制度はございません",
+        "株主優待はございません",
     ]
     urls = [
         f"https://kabutan.jp/stock/yutai?code={code4}",
@@ -431,33 +449,28 @@ def get_yutai(code4):
 
             html = resp.text
 
-            if any(m in html for m in NO_YUTAI):
+            # 「なし」が明示されている場合
+            if any(marker in html for marker in NO_YUTAI):
+                print(f"    yutai {code4}: なし(明示)")
                 return "なし"
 
+            # 構造化データを厳格にパース
             shares_text, month_text = _parse_yutai_html(html)
 
             if month_text or shares_text:
-                parts = []
-                if shares_text:
-                    parts.append(shares_text)
-                if month_text:
-                    parts.append(month_text)
+                parts = [p for p in [shares_text, month_text] if p]
                 result = " / ".join(parts)
                 print(f"    yutai {code4}: {result}")
                 return result
 
-            # ページ自体は取れたが詳細パース失敗
-            if "優待" in html and ("権利確定" in html or "権利月" in html):
-                print(f"    yutai {code4}: あり(詳細取得失敗)")
-                return "あり(詳細確認要)"
-
-            # 優待情報が全くない
-            return "なし"
+            # ページは取得できたが判定不可 → 次のURLへ
+            print(f"    yutai {code4}: パース失敗、次URL試行")
 
         except Exception as e:
             print(f"    yutai error {code4}: {str(e)[:60]}")
             continue
 
+    # 全URL失敗 or 判定不可
     return "-"
 
 def analyze(symbol, industry, forced=False):
