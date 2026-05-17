@@ -2,9 +2,60 @@ import streamlit as st
 import pandas as pd
 import requests
 import json
+import base64
 import os
 from datetime import datetime
 import time
+
+
+def _make_div_svg(raw_data):
+    """[[year, value], ...] → SVG data URL（年ラベル付きミニ棒グラフ）"""
+    if not raw_data or not isinstance(raw_data, list):
+        return ""
+    data = [d for d in raw_data if isinstance(d, list) and len(d) == 2]
+    if not data:
+        return ""
+
+    W, H       = 220, 68
+    pad_l, pad_r, pad_t, pad_b = 2, 2, 3, 15
+    cw = W - pad_l - pad_r
+    ch = H - pad_t - pad_b
+
+    values = [float(d[1]) for d in data]
+    n      = len(values)
+    max_v  = max(values)
+    min_v  = min(values)
+    if max_v == min_v:
+        min_v = max_v * 0.8
+    rng   = max_v - min_v if max_v != min_v else 1
+    bar_w = cw / n
+
+    parts = []
+    for i, (year, val) in enumerate(data):
+        x     = pad_l + i * bar_w
+        bar_h = max(2.0, (float(val) - min_v) / rng * ch)
+        y     = pad_t + ch - bar_h
+        fill  = "#1565c0" if i == n - 1 else "#64b5f6"
+        parts.append(
+            f'<rect x="{x:.1f}" y="{y:.1f}" '
+            f'width="{max(1.5, bar_w - 1):.1f}" height="{bar_h:.1f}" fill="{fill}"/>'
+        )
+        # 年ラベル: 10年以下は毎年、11年以上は偶数インデックスのみ
+        if n <= 10 or i % 2 == 0:
+            lx  = x + bar_w / 2
+            yr  = str(year)[-2:]
+            parts.append(
+                f'<text x="{lx:.1f}" y="{H - 2}" '
+                f'font-size="7" text-anchor="middle" fill="#888">{yr}</text>'
+            )
+
+    svg = (
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{W}" height="{H}">'
+        + "".join(parts)
+        + "</svg>"
+    )
+    b64 = base64.b64encode(svg.encode()).decode()
+    return f"data:image/svg+xml;base64,{b64}"
 
 try:
     import libsql_experimental as db_lib
@@ -156,14 +207,13 @@ def get_results(scan_id=None):
                     return data if data and isinstance(data[0], list) else []
                 except Exception:
                     return []
-            df["配当推移"]   = df["_div_trend_json"].apply(lambda s: _parse_trend(s)[0])
-            df["_trend_raw"] = df["_div_trend_json"].apply(_extract_raw)  # [[year,value],...] 詳細チャート用
+            df["配当グラフ"]  = df["_div_trend_json"].apply(_extract_raw).apply(_make_div_svg)
             df = df.drop(columns=["_div_trend_json"])
             col_order = [
                 "業種", "コード", "銘柄名", "利回り(%)", "配当性向(%)",
-                "自己資本(%)", "時価総額(億)", "配当増減歴", "配当推移", "EPS",
+                "自己資本(%)", "時価総額(億)", "配当増減歴", "配当グラフ", "EPS",
                 "判定", "おすすめ度", "株主優待", "備考",
-                "score", "スキャン日時", "_trend_raw"
+                "score", "スキャン日時"
             ]
             df = df[col_order]
         else:
@@ -470,7 +520,7 @@ else:
     else:
         filtered_df = filtered_df.sort_values(["利回り(%)", "score"], ascending=[False, False])
 
-    display_df = filtered_df.drop(columns=["score", "スキャン日時", "_trend_raw"], errors="ignore")
+    display_df = filtered_df.drop(columns=["score", "スキャン日時"], errors="ignore")
 
     def apply_search(df, query):
         """クエリに一致する行のみ返す（大文字小文字無視）"""
@@ -534,13 +584,13 @@ else:
     osusume_sorted = osusume_src.sort_values(
         ["利回り(%)", "score", "_yr"], ascending=[False, False, False]
     )
-    osusume_disp = osusume_sorted.drop(columns=["score", "スキャン日時", "_yr", "_trend_raw"], errors="ignore")
+    osusume_disp = osusume_sorted.drop(columns=["score", "スキャン日時", "_yr"], errors="ignore")
     osusume_starred = add_star_to_best(osusume_sorted, osusume_disp)
     osusume_with_changes = apply_changes_to_display(osusume_starred, _changes)
     _os_highlighter = make_highlighter(osusume_sorted, _changes, is_osusume=True)
 
     _col_cfg = {
-        "配当推移": st.column_config.LineChartColumn("配当推移", y_min=0, width="small"),
+        "配当グラフ": st.column_config.ImageColumn("配当推移(年付)", width="medium"),
     }
 
     tabs = st.tabs(["おすすめ", "全件"] + industries)
@@ -577,24 +627,6 @@ else:
     st.download_button("CSVダウンロード", csv, f"Hidividend_{dt_str}.csv", "text/csv")
 
     st.divider()
-    with st.expander("📊 配当推移チャート（年ラベル付き）", expanded=False):
-        chart_options = [
-            f"{int(r['コード'])} {r['銘柄名']}"
-            for _, r in filtered_df.iterrows()
-        ]
-        selected_stock = st.selectbox("銘柄を選択", chart_options, key="div_chart_sel")
-        if selected_stock:
-            sel_code = int(selected_stock.split(" ")[0])
-            sel_row  = filtered_df[filtered_df["コード"] == sel_code]
-            if not sel_row.empty:
-                raw = sel_row["_trend_raw"].iloc[0]
-                if isinstance(raw, list) and len(raw) > 0:
-                    chart_df = pd.DataFrame(raw, columns=["年", "配当(円)"])
-                    chart_df["年"] = chart_df["年"].astype(str)
-                    st.bar_chart(chart_df.set_index("年"), use_container_width=True)
-                else:
-                    st.info("配当データがありません（次回スキャン後に反映されます）")
-
     with st.expander("🔍 スクリーニングログ（除外銘柄）", expanded=False):
         log_df = get_scan_log(_current_sid)
         if log_df.empty:

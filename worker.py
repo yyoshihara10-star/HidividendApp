@@ -598,6 +598,31 @@ def analyze(symbol, industry, forced=False):
     if cut_count == 0 and 0 < years_checked < 10:
         reasons.append("配当歴" + str(years_checked) + "年(10年未満)")
 
+    # 当年配当確定分：前年同期比で増減を備考に表記
+    try:
+        rd = ticker.dividends
+        if rd is not None and len(rd) > 0:
+            rd = rd.copy()
+            rd.index = rd.index.tz_localize(None) if rd.index.tzinfo else rd.index
+            now    = pd.Timestamp.now()
+            cur_yr = now.year
+            curr_sum = rd[rd.index.year == cur_yr].sum()
+            if curr_sum > 0:
+                prev_sum = rd[
+                    (rd.index >= pd.Timestamp(cur_yr - 1, 1, 1)) &
+                    (rd.index <= pd.Timestamp(cur_yr - 1, now.month, now.day))
+                ].sum()
+                if prev_sum > 0:
+                    chg = (curr_sum - prev_sum) / prev_sum * 100
+                    if chg >= 5:
+                        reasons.append(str(cur_yr) + "年増配確定(" + str(round(curr_sum, 1)) + "円/前年同期比+" + str(round(chg, 1)) + "%)")
+                    elif chg <= -5:
+                        reasons.append(str(cur_yr) + "年減配確定(" + str(round(curr_sum, 1)) + "円/前年同期比" + str(round(chg, 1)) + "%)")
+                else:
+                    reasons.append(str(cur_yr) + "年配当確定(" + str(round(curr_sum, 1)) + "円)")
+    except Exception:
+        pass
+
     rev_g = info.get("revenueGrowth")
     ear_g = info.get("earningsGrowth")
     if rev_g is not None:
