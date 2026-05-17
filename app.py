@@ -372,6 +372,11 @@ def compute_changes(current_df, prev_df):
 def apply_changes_to_display(display_df, changes):
     """セル値に前回比を付記したDataFrameを返す"""
     df = display_df.copy()
+    # 文字列注記を書き込む列はobject型に変換しておく（float列への文字列代入TypeError対策）
+    tracked_cols = {"利回り(%)", "配当性向(%)", "自己資本(%)", "配当増減歴", "EPS"}
+    for col in tracked_cols:
+        if col in df.columns:
+            df[col] = df[col].astype(object)
     for idx, row in df.iterrows():
         code = row["コード"]
         if code not in changes:
@@ -545,9 +550,12 @@ else:
             score_val = df_orig.loc[df_orig["コード"] == code, "score"].values
             yield_val = df_orig.loc[df_orig["コード"] == code, "利回り(%)"].values
             note_val  = df_orig.loc[df_orig["コード"] == code, "備考"].values
-            has_cut = len(note_val) > 0 and "減配歴" in str(note_val[0])
+            _NEGATIVE_KEYWORDS = ["減配歴", "成長データ不明", "10年未満", "減配確定",
+                                   "売上減", "利益減", "配当性向", "自己資本", "低め)"]
+            note_str = str(note_val[0]) if len(note_val) > 0 else ""
+            has_negative = any(k in note_str for k in _NEGATIVE_KEYWORDS)
             if (len(score_val) > 0 and score_val[0] == 5 and
-                    len(yield_val) > 0 and yield_val[0] >= 3.5 and not has_cut):
+                    len(yield_val) > 0 and yield_val[0] >= 3.5 and not has_negative):
                 res.at[idx, "備考"] = "★" + str(row["備考"])
         return res
 
@@ -568,9 +576,14 @@ else:
         industries = ["商社"] + [i for i in industries if i != "商社"]
 
     # おすすめタブ用データ（score>=4 かつ 利回り>=3.5%、優待あり優先）
+    def _is_osusume_eligible(note):
+        _EXCLUDE = ["配当性向", "低め)"]
+        return not any(k in str(note) for k in _EXCLUDE)
+
     osusume_src = filtered_df[
         (filtered_df["score"] >= 4) &
-        (filtered_df["利回り(%)"] >= 3.5)
+        (filtered_df["利回り(%)"] >= 3.5) &
+        (filtered_df["備考"].apply(_is_osusume_eligible))
     ].copy()
 
     def _yutai_rank(v):

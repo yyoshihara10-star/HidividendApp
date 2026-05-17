@@ -242,7 +242,7 @@ def check_dividend_history(ticker):
             return [[int(a.index[i].year), round(float(a.iloc[i]), 1)] for i in range(len(a))]
 
         if len(annual) < 2:
-            return 0, len(annual), False, "配当履歴" + str(len(annual)) + "年分", _annual_data(annual)
+            return 0, len(annual), False, "配当履歴" + str(len(annual)) + "年分", _annual_data(annual), 0
 
         years_checked = len(annual)
         cut_count     = 0
@@ -270,16 +270,24 @@ def check_dividend_history(ticker):
             if annual.iloc[-1] > annual.iloc[0] * 1.05:
                 is_increasing = True
 
+        # 直近連続増配年数（前年比で増えている年が何年続いているか）
+        consecutive_increase = 0
+        for i in range(len(annual) - 1, 0, -1):
+            if annual.iloc[i] > annual.iloc[i - 1]:
+                consecutive_increase += 1
+            else:
+                break
+
         detail = "配当" + str(years_checked) + "年確認"
         if is_increasing:
             detail += "/増加傾向"
         if cut_years:
             detail += "/減配:" + ",".join(cut_years)
 
-        return cut_count, years_checked, is_increasing, detail, _annual_data(annual)
+        return cut_count, years_checked, is_increasing, detail, _annual_data(annual), consecutive_increase
 
     except Exception as e:
-        return 0, 0, False, "配当履歴取得失敗", []
+        return 0, 0, False, "配当履歴取得失敗", [], 0
 
 def make_div_history_str(cut_count, years_checked, is_increasing):
     if years_checked == 0:
@@ -581,21 +589,29 @@ def analyze(symbol, industry, forced=False):
         score -= 1
         reasons.append("利回り" + str(dy) + "%(低め)")
 
-    cut_count, years_checked, is_increasing, div_detail, annual_list = check_dividend_history(ticker)
+    cut_count, years_checked, is_increasing, div_detail, annual_list, consecutive_increase = check_dividend_history(ticker)
     div_history = make_div_history_str(cut_count, years_checked, is_increasing)
     div_trend   = json.dumps(annual_list) if annual_list else "[]"
 
     if cut_count >= 2:
         if is_increasing:
             score -= 2
-            reasons.append("減配歴" + str(cut_count) + "回(増配傾向継続)")
+            note = "減配歴" + str(cut_count) + "回(増配傾向継続)"
+            if consecutive_increase > 0:
+                note += "/連続増配" + str(consecutive_increase) + "年"
+            reasons.append(note)
             print("    div cut " + str(cut_count) + " but increasing trend: include with penalty")
         else:
             print("    reason: div cut " + str(cut_count) + " times no increasing trend")
             return {"excluded": True, "reason": "減配" + str(cut_count) + "回・増配傾向なし", "dy": dy}
     elif cut_count == 1:
-        reasons.append("減配歴1回")
-    if cut_count == 0 and 0 < years_checked < 10:
+        note = "減配歴1回"
+        if consecutive_increase > 0:
+            note += "/連続増配" + str(consecutive_increase) + "年"
+        reasons.append(note)
+    if years_checked == 0:
+        reasons.append("配当歴取得不可")
+    elif 0 < years_checked < 10:
         reasons.append("配当歴" + str(years_checked) + "年(10年未満)")
 
     # 当年配当確定分：前年同期比で増減を備考に表記
