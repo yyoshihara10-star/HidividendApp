@@ -136,6 +136,16 @@ header[data-testid="stHeader"] { background: transparent !important; }
     .block-container { padding-bottom: 80px !important; }
 }
 
+/* ===== dataframe スクロール干渉防止 ===== */
+[data-testid="stDataFrame"] {
+    overscroll-behavior: contain;
+    touch-action: pan-y;
+}
+[data-testid="stDataFrame"] iframe {
+    overscroll-behavior: contain;
+    touch-action: pan-y;
+}
+
 /* ===== モバイル: サイドバートグルボタン ===== */
 [data-testid="stSidebarCollapsedControl"] {
     top: 10px !important;
