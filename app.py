@@ -721,7 +721,7 @@ else:
   </div>
   <div style="flex:1;min-width:120px;background:#f0f4ff;border-radius:10px;padding:10px 14px;box-shadow:0 1px 3px rgba(0,0,0,0.07)">
     <div style="font-size:10px;color:#888;margin-bottom:2px">前回比</div>
-    <div style="font-size:13px;font-weight:700;color:#444;margin-top:4px">{_change_note}</div>
+    <div style="font-size:10px;font-weight:600;color:#666;margin-top:6px">{_change_note}</div>
   </div>
 </div>
 <div style="font-size:11px;color:#888;margin-bottom:8px">黄色ハイライト・★ = 利回り3.5%以上かつ★★★★★</div>
