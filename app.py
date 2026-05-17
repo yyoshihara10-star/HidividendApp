@@ -222,6 +222,12 @@ else:
         with f_col4:
             sort_by = st.selectbox("ソート", ["利回り高い順+おすすめ度高い順", "おすすめ度高い順", "配当性向低い順"])
 
+    search_query = st.text_input(
+        "🔎 キーワード検索",
+        placeholder="銘柄名・業種・コード・備考・株主優待など...",
+        key="result_search"
+    )
+
     filtered_df = df[
         (df["利回り(%)"] >= min_yield) &
         (df["配当性向(%)"] <= max_payout) &
@@ -236,6 +242,22 @@ else:
         filtered_df = filtered_df.sort_values(["利回り(%)", "score"], ascending=[False, False])
 
     display_df = filtered_df.drop(columns=["score", "スキャン日時"], errors="ignore")
+
+    def apply_search(df, query):
+        """クエリに一致する行のみ返す（大文字小文字無視）"""
+        q = query.strip() if query else ""
+        if not q:
+            return df
+        return df[df.apply(
+            lambda row: row.astype(str).str.contains(q, case=False, na=False).any(),
+            axis=1
+        )]
+
+    def with_1idx(df):
+        """表示用に1始まりインデックスを付ける"""
+        d = df.reset_index(drop=True)
+        d.index = d.index + 1
+        return d
 
     def add_star_to_best(df_orig, disp_df):
         res = disp_df.copy()
@@ -296,17 +318,21 @@ else:
     tabs = st.tabs(["おすすめ", "全件"] + industries)
 
     with tabs[0]:
-        if osusume_starred.empty:
+        _os = with_1idx(apply_search(osusume_starred, search_query))
+        if _os.empty:
             st.info("おすすめ条件（利回り3.5%以上・おすすめ度★★★★以上）に該当する銘柄はありません。")
         else:
-            st.dataframe(osusume_starred.style.apply(highlight_osusume, axis=1), use_container_width=True)
+            st.dataframe(_os.style.apply(highlight_osusume, axis=1), use_container_width=True)
 
     with tabs[1]:
-        st.dataframe(starred_df.style.apply(highlight_best, axis=1), use_container_width=True)
+        _all = with_1idx(apply_search(starred_df, search_query))
+        st.dataframe(_all.style.apply(highlight_best, axis=1), use_container_width=True)
 
     for tab, ind in zip(tabs[2:], industries):
         with tab:
-            ind_df = starred_df[starred_df["業種"] == ind].reset_index(drop=True)
+            ind_df = with_1idx(apply_search(
+                starred_df[starred_df["業種"] == ind], search_query
+            ))
             def highlight_ind(row, i=ind):
                 if row["利回り(%)"] < 3.0:
                     return ["background-color: #e0e0e0; color: #888888"] * len(row)
