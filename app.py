@@ -322,12 +322,12 @@ def compute_changes(current_df, prev_df):
         except Exception:
             pass
 
-        # 配当性向(%) — down=good
+        # 配当性向(%) — up=good(blue)
         try:
             c_v, p_v = float(row["配当性向(%)"]), float(prev["配当性向(%)"])
             if abs(c_v - p_v) >= 1.0:
                 inc = c_v > p_v
-                code_changes["配当性向(%)"] = {"good": not inc, "increased": inc,
+                code_changes["配当性向(%)"] = {"good": inc, "increased": inc,
                                                 "prev": f"{p_v:.1f}%", "curr": f"{c_v:.1f}%"}
         except Exception:
             pass
