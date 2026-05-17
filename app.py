@@ -132,8 +132,29 @@ header[data-testid="stHeader"] { background: transparent !important; }
 }
 @media (max-width: 768px) {
     .mobile-bottom-bar { display: flex; }
-    .app-header { margin: -1rem -1rem 1rem -1rem; }
+    .app-header { margin: -1rem -1rem 1rem -1rem; padding-left: 60px; }
     .block-container { padding-bottom: 80px !important; }
+}
+
+/* ===== モバイル: サイドバートグルボタン ===== */
+[data-testid="stSidebarCollapsedControl"] {
+    top: 10px !important;
+    left: 8px !important;
+    z-index: 1100 !important;
+}
+[data-testid="stSidebarCollapsedControl"] button {
+    background: rgba(255,255,255,0.25) !important;
+    border-radius: 10px !important;
+    border: 1.5px solid rgba(255,255,255,0.5) !important;
+    color: #fff !important;
+    width: 40px !important;
+    height: 40px !important;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.2) !important;
+    backdrop-filter: blur(4px) !important;
+}
+[data-testid="stSidebarCollapsedControl"] button svg {
+    fill: #fff !important;
+    stroke: #fff !important;
 }
 .mbb-btn {
     flex: 1;
