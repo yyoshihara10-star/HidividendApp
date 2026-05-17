@@ -65,7 +65,8 @@ except ImportError:
 st.set_page_config(page_title="プライム高配当株スクリーニング", layout="wide")
 st.title("高配当株スクリーニング")
 
-st.markdown("""
+with st.expander("スクリーニング条件・情報ソースを見る"):
+    st.markdown("""
 **対象**: 東証プライム上場銘柄（JPX銘柄一覧を毎月1日に自動取得・更新）
 
 **除外条件**
