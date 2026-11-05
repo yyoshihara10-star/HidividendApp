@@ -272,25 +272,55 @@ def get_results(scan_id=None):
             scan_id = get_latest_scan_id()
         if scan_id:
             c = conn.cursor()
-            c.execute("""
-                SELECT
-                    industry, code, name, yield_pct, payout_pct,
-                    equity_pct, mcap_oku, judge, stars, note,
-                    score, scanned_at,
-                    COALESCE(yutai, '-') as yutai,
-                    COALESCE(div_history, '-') as div_history,
-                    COALESCE(eps_str, '-') as eps_str,
-                    COALESCE(div_trend, '[]') as div_trend
-                FROM scan_results
-                WHERE scan_id = ?
-                ORDER BY yield_pct DESC, score DESC
-            """, (scan_id,))
-            rows = c.fetchall()
+            try:
+                c.execute("""
+                    SELECT
+                        industry, code, name, yield_pct, payout_pct,
+                        equity_pct, mcap_oku, judge, stars, note,
+                        score, scanned_at,
+                        COALESCE(yutai, '-') as yutai,
+                        COALESCE(div_history, '-') as div_history,
+                        COALESCE(eps_str, '-') as eps_str,
+                        COALESCE(div_trend, '[]') as div_trend,
+                        COALESCE(score_sustain, 0) as score_sustain,
+                        COALESCE(score_finance, 0) as score_finance,
+                        COALESCE(score_growth, 0) as score_growth,
+                        COALESCE(score_return, 0) as score_return
+                    FROM scan_results
+                    WHERE scan_id = ?
+                    ORDER BY yield_pct DESC, score DESC
+                """, (scan_id,))
+                rows = c.fetchall()
+            except Exception:
+                # 軸カラム追加前の旧スキャンDB向けフォールバック
+                c.execute("""
+                    SELECT
+                        industry, code, name, yield_pct, payout_pct,
+                        equity_pct, mcap_oku, judge, stars, note,
+                        score, scanned_at,
+                        COALESCE(yutai, '-') as yutai,
+                        COALESCE(div_history, '-') as div_history,
+                        COALESCE(eps_str, '-') as eps_str,
+                        COALESCE(div_trend, '[]') as div_trend
+                    FROM scan_results
+                    WHERE scan_id = ?
+                    ORDER BY yield_pct DESC, score DESC
+                """, (scan_id,))
+                rows = [tuple(r) + (0, 0, 0, 0) for r in c.fetchall()]
             df = pd.DataFrame(rows, columns=[
                 "業種", "コード", "銘柄名", "利回り(%)", "配当性向(%)",
                 "自己資本(%)", "時価総額(億)", "判定", "おすすめ度", "備考",
-                "score", "スキャン日時", "株主優待", "配当増減歴", "EPS", "_div_trend_json"
+                "score", "スキャン日時", "株主優待", "配当増減歴", "EPS", "_div_trend_json",
+                "持続性", "健全性", "成長性", "還元魅力"
             ])
+            # 新旧スコア判定: 軸スコアがある、または score>5 の行は100点満点（新方式）
+            df["_axes_sum"] = df["持続性"] + df["健全性"] + df["成長性"] + df["還元魅力"]
+            df["_is_new"] = (df["_axes_sum"] > 0) | (df["score"] > 5)
+            def _calc_stars(row):
+                if row["_is_new"]:
+                    return max(1, min(5, int(row["score"] / 20 + 0.5)))
+                return int(row["score"])
+            df["_stars"] = df.apply(_calc_stars, axis=1)
             def _parse_trend(s):
                 """[[year,val],...] または [val,...] どちらにも対応。(values, year_label) を返す"""
                 try:
@@ -318,8 +348,9 @@ def get_results(scan_id=None):
             col_order = [
                 "業種", "コード", "銘柄名", "利回り(%)", "配当性向(%)",
                 "自己資本(%)", "時価総額(億)", "配当増減歴", "配当グラフ", "EPS",
-                "判定", "おすすめ度", "株主優待", "備考",
-                "score", "スキャン日時"
+                "判定", "おすすめ度", "持続性", "健全性", "成長性", "還元魅力",
+                "株主優待", "備考",
+                "score", "スキャン日時", "_stars", "_is_new", "_axes_sum"
             ]
             df = df[col_order]
         else:
@@ -503,7 +534,7 @@ def make_highlighter(filtered_df, changes, is_osusume=False):
         if orig.empty:
             return [""] * len(row)
         yield_val = float(orig["利回り(%)"].iloc[0])
-        score_val = int(orig["score"].iloc[0])
+        score_val = int(orig["_stars"].iloc[0])
 
         if yield_val < 3.0:
             return ["background-color: #e0e0e0; color: #888888"] * len(row)
@@ -575,14 +606,16 @@ with st.sidebar:
 **対象**: 東証プライム（JPX、毎月1日更新）
 
 **除外条件**
-* 利回り3%未満 / 性向30%未満・70%超（回復見込みなし）
-* 自己資本40%未満（金融除く）
+* 利回り3%未満 / 配当性向100%超（EPS超過配当）/ 配当性向が計算不可
 * 減配2回以上かつ増配傾向なし
 * 当年減配確定 / 前年減配かつ今年増配未確認
 
-**おすすめ度（★1〜5）**  基本5点から減点
-* 減配2回以上(増配傾向あり) -2 / その他基準外 各-1
-* ★5・利回り3.5%以上 → おすすめタブ掲載
+**スコア（100点満点 = 4軸×25点）**
+* 持続性：減配回数・非減配継続年数・配当性向の余裕・FCFカバレッジ
+* 健全性：自己資本比率・D/E・ROE（金融は自己資本/D/Eを中立点で評価）
+* 成長性：増配傾向・EPS成長・売上成長・利益成長
+* 還元魅力：利回り水準・配当性向・連続増配年数・増配の勢い
+* ★は総合点を20点刻みで換算。総合80点以上・利回り3.5%以上 → おすすめタブ掲載
 
 **情報ソース**
 * 株価・財務: Yahoo Finance
@@ -668,7 +701,7 @@ else:
     filtered_df = df[
         (df["利回り(%)"] >= min_yield) &
         (df["配当性向(%)"] <= max_payout) &
-        (df["score"] >= min_score)
+        (df["_stars"] >= min_score)
     ].copy()
 
     if sort_by == "おすすめ度高い順":
@@ -678,7 +711,7 @@ else:
     else:
         filtered_df = filtered_df.sort_values(["利回り(%)", "score"], ascending=[False, False])
 
-    display_df = filtered_df.drop(columns=["score", "スキャン日時"], errors="ignore")
+    display_df = filtered_df.drop(columns=["score", "スキャン日時", "_stars", "_is_new", "_axes_sum"], errors="ignore")
 
     def apply_search(df, query):
         """クエリに一致する行のみ返す（大文字小文字無視）"""
@@ -700,7 +733,7 @@ else:
         res = disp_df.copy()
         for idx, row in res.iterrows():
             code = row["コード"]
-            score_val = df_orig.loc[df_orig["コード"] == code, "score"].values
+            score_val = df_orig.loc[df_orig["コード"] == code, "_stars"].values
             yield_val = df_orig.loc[df_orig["コード"] == code, "利回り(%)"].values
             note_val  = df_orig.loc[df_orig["コード"] == code, "備考"].values
             _NEGATIVE_KEYWORDS = ["減配歴", "成長データ不明", "10年未満", "減配確定",
@@ -725,7 +758,8 @@ else:
         return not any(k in str(note) for k in _EXCLUDE)
 
     osusume_src = filtered_df[
-        (filtered_df["score"] >= 4) &
+        (((filtered_df["_is_new"]) & (filtered_df["score"] >= 80)) |
+         ((~filtered_df["_is_new"]) & (filtered_df["score"] >= 4))) &
         (filtered_df["利回り(%)"] >= 3.5) &
         (filtered_df["備考"].apply(_is_osusume_eligible))
     ].copy()
@@ -773,13 +807,17 @@ else:
     osusume_sorted = osusume_src.sort_values(
         ["利回り(%)", "score", "_yr"], ascending=[False, False, False]
     )
-    osusume_disp = osusume_sorted.drop(columns=["score", "スキャン日時", "_yr"], errors="ignore")
+    osusume_disp = osusume_sorted.drop(columns=["score", "スキャン日時", "_yr", "_stars", "_is_new", "_axes_sum"], errors="ignore")
     osusume_starred = add_star_to_best(osusume_sorted, osusume_disp)
     osusume_with_changes = apply_changes_to_display(osusume_starred, _changes)
     _os_highlighter = make_highlighter(osusume_sorted, _changes, is_osusume=True)
 
     _col_cfg = {
         "配当グラフ": st.column_config.ImageColumn("配当推移(年付)", width="medium"),
+        "持続性":   st.column_config.NumberColumn("持続性",   format="%.1f", width="small"),
+        "健全性":   st.column_config.NumberColumn("健全性",   format="%.1f", width="small"),
+        "成長性":   st.column_config.NumberColumn("成長性",   format="%.1f", width="small"),
+        "還元魅力": st.column_config.NumberColumn("還元魅力", format="%.1f", width="small"),
     }
 
     tabs = st.tabs(["おすすめ", "全件"] + industries)
@@ -787,7 +825,7 @@ else:
     with tabs[0]:
         _os = with_1idx(apply_search(osusume_with_changes, search_query))
         if _os.empty:
-            st.info("おすすめ条件（利回り3.5%以上・おすすめ度★★★★以上）に該当する銘柄はありません。")
+            st.info("おすすめ条件（総合80点以上・利回り3.5%以上）に該当する銘柄はありません。")
         else:
             st.dataframe(_os.style.apply(_os_highlighter, axis=1),
                          column_config=_col_cfg, use_container_width=True, height=600)

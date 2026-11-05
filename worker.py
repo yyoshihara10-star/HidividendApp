@@ -63,7 +63,11 @@ def init_db():
             judge TEXT,
             stars TEXT,
             note TEXT,
-            score INTEGER
+            score INTEGER,
+            score_sustain REAL,
+            score_finance REAL,
+            score_growth REAL,
+            score_return REAL
         )
     """)
     existing = [row[1] for row in c.execute("PRAGMA table_info(scan_results)").fetchall()]
@@ -89,6 +93,12 @@ def init_db():
         conn.commit()
     except:
         pass
+    for _axis_col in ("score_sustain", "score_finance", "score_growth", "score_return"):
+        try:
+            c.execute("ALTER TABLE scan_results ADD COLUMN " + _axis_col + " REAL")
+            conn.commit()
+        except:
+            pass
 
     c.execute("""
         CREATE TABLE IF NOT EXISTS scan_log (
@@ -137,8 +147,9 @@ def save_results_batch(rows, scan_id):
     c.executemany("""
         INSERT INTO scan_results
         (scan_id, scanned_at, industry, code, name, yield_pct, payout_pct,
-         equity_pct, mcap_oku, judge, stars, note, score, yutai, div_history, eps_str, div_trend)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+         equity_pct, mcap_oku, judge, stars, note, score, yutai, div_history, eps_str, div_trend,
+         score_sustain, score_finance, score_growth, score_return)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
     """, rows)
     conn.commit()
     conn.close()
@@ -220,17 +231,31 @@ def get_sector_targets(sector_df, col_map):
     return df.head(30)
 
 def check_dividend_history(ticker):
+    """配当履歴を分析し dict で返す（全経路で同じキーを持つ）"""
+    result = {
+        "cut_count": 0,
+        "years_checked": 0,
+        "is_increasing": False,
+        "detail": "配当履歴なし",
+        "annual_list": [],
+        "consecutive_increase": 0,
+        "consecutive_noncut": 0,
+        "last_year_cut": False,
+        "cut_years": [],
+        "trend_ratio": None,
+        "special_suspect_years": [],
+    }
     try:
         divs = ticker.dividends
         if divs is None or len(divs) == 0:
-            return 0, 0, False, "配当履歴なし", []
+            return result
 
         divs.index = divs.index.tz_localize(None) if divs.index.tzinfo else divs.index
         cutoff = pd.Timestamp.now() - pd.DateOffset(years=10)
         divs   = divs[divs.index >= cutoff]
 
         if len(divs) == 0:
-            return 0, 0, False, "配当履歴なし", []
+            return result
 
         annual = divs.resample("YE").sum()
         annual = annual[annual > 0]
@@ -241,26 +266,35 @@ def check_dividend_history(ticker):
         def _annual_data(a):
             return [[int(a.index[i].year), round(float(a.iloc[i]), 1)] for i in range(len(a))]
 
+        result["annual_list"]   = _annual_data(annual)
+        result["years_checked"] = len(annual)
+
         if len(annual) < 2:
-            return 0, len(annual), False, "配当履歴" + str(len(annual)) + "年分", _annual_data(annual), 0, False, []
+            result["detail"] = "配当履歴" + str(len(annual)) + "年分"
+            if len(annual) == 1:
+                result["consecutive_noncut"] = 1
+            return result
 
-        years_checked = len(annual)
-        cut_count     = 0
-        cut_years     = []
-
+        cut_count = 0
+        cut_years = []
         for i in range(1, len(annual)):
             prev = annual.iloc[i - 1]
             curr = annual.iloc[i]
             if curr < prev * 0.95:
                 cut_count += 1
                 cut_years.append(str(annual.index[i].year))
+        result["cut_count"] = cut_count
+        result["cut_years"] = cut_years
 
         is_increasing = False
+        trend_ratio = None
         if len(annual) >= 3:
             # 前半vs後半の平均比較（直近の下落を無視しないため固定3年比較をやめる）
             mid       = len(annual) // 2
             early_avg = annual.iloc[:mid].mean()
             late_avg  = annual.iloc[mid:].mean()
+            if early_avg > 0:
+                trend_ratio = round(late_avg / early_avg, 3)
             trend_up  = early_avg > 0 and late_avg > early_avg * 1.05
             # 直近年が前年から5%超下落していれば増配傾向とみなさない
             recent_ok = annual.iloc[-1] >= annual.iloc[-2] * 0.95
@@ -269,6 +303,10 @@ def check_dividend_history(ticker):
         elif len(annual) >= 2:
             if annual.iloc[-1] > annual.iloc[0] * 1.05:
                 is_increasing = True
+            if annual.iloc[0] > 0:
+                trend_ratio = round(annual.iloc[-1] / annual.iloc[0], 3)
+        result["is_increasing"] = is_increasing
+        result["trend_ratio"]   = trend_ratio
 
         # 直近連続増配年数（前年比で増えている年が何年続いているか）
         consecutive_increase = 0
@@ -277,20 +315,39 @@ def check_dividend_history(ticker):
                 consecutive_increase += 1
             else:
                 break
+        result["consecutive_increase"] = consecutive_increase
+
+        # 直近の非減配継続年数（5%超の下落がない状態が何年続いているか、年数ベース）
+        noncut_steps = 0
+        for i in range(len(annual) - 1, 0, -1):
+            if annual.iloc[i] >= annual.iloc[i - 1] * 0.95:
+                noncut_steps += 1
+            else:
+                break
+        result["consecutive_noncut"] = min(noncut_steps + 1, len(annual))
 
         # 直前の完了年が減配だったか
-        last_year_cut = len(annual) >= 2 and annual.iloc[-1] < annual.iloc[-2] * 0.95
+        result["last_year_cut"] = len(annual) >= 2 and annual.iloc[-1] < annual.iloc[-2] * 0.95
 
-        detail = "配当" + str(years_checked) + "年確認"
+        # 特別配当の疑い：単年だけ突出（前年の1.5倍超）し、翌年に元の水準へ戻る年
+        suspects = []
+        for i in range(1, len(annual) - 1):
+            prev_v, curr_v, next_v = annual.iloc[i - 1], annual.iloc[i], annual.iloc[i + 1]
+            if prev_v > 0 and curr_v > prev_v * 1.5 and next_v < curr_v * 0.7 and next_v <= prev_v * 1.15:
+                suspects.append(str(annual.index[i].year))
+        result["special_suspect_years"] = suspects
+
+        detail = "配当" + str(len(annual)) + "年確認"
         if is_increasing:
             detail += "/増加傾向"
         if cut_years:
             detail += "/減配:" + ",".join(cut_years)
-
-        return cut_count, years_checked, is_increasing, detail, _annual_data(annual), consecutive_increase, last_year_cut, cut_years
+        result["detail"] = detail
+        return result
 
     except Exception as e:
-        return 0, 0, False, "配当履歴取得失敗", [], 0, False, []
+        result["detail"] = "配当履歴取得失敗"
+        return result
 
 def make_div_history_str(cut_count, years_checked, is_increasing):
     if years_checked == 0:
@@ -316,6 +373,7 @@ def make_eps_str(t_eps, f_eps):
     return "-"
 
 def get_payout_ratio(info, ticker):
+    """(配当性向, 計算不能理由) を返す。計算できれば (値, "")"""
     f_eps = info.get("forwardEps")
     t_eps = info.get("trailingEps")
 
@@ -325,11 +383,10 @@ def get_payout_ratio(info, ticker):
         eps = t_eps
     elif f_eps is not None and f_eps > 0:
         eps = f_eps
+    elif t_eps is not None or f_eps is not None:
+        return None, "EPS赤字"
     else:
-        return 0
-
-    if eps is None or eps <= 0:
-        return 0
+        return None, "EPSデータ欠損"
 
     div_rate = info.get("dividendRate") or info.get("trailingAnnualDividendRate") or 0
 
@@ -344,14 +401,14 @@ def get_payout_ratio(info, ticker):
             pass
 
     if div_rate <= 0:
-        return 0
+        return None, "配当データ欠損"
 
     payout = round(div_rate / eps * 100, 1)
 
     if payout <= 0 or payout > 1000:
-        return 0
+        return None, "配当性向データ異常"
 
-    return payout
+    return payout, ""
 
 def check_payout_recovery(info):
     t_eps = info.get("trailingEps")
@@ -370,7 +427,8 @@ def check_payout_recovery(info):
         return True, "業績回復見込み(利益成長+" + str(round(ear_g * 100, 1)) + "%)"
     return False, ""
 
-def get_equity_ratio(info, ticker, is_finance):
+def get_equity_ratio(info, ticker):
+    """自己資本比率(%)。取得できなければ None（0%と区別する）"""
     try:
         bs = ticker.balance_sheet
         if bs is not None and not bs.empty:
@@ -400,7 +458,150 @@ def get_equity_ratio(info, ticker, is_finance):
     except:
         pass
 
-    return 0.0
+    return None
+
+
+def get_fcf_coverage(ticker, info, div_rate):
+    """FCFカバレッジ = FCF平均（最大4期） ÷ 直近期の年間配当総額。
+    設備投資の単年ブレに引きずられないよう FCF は複数期平均を使う。
+    取得できなければ None。FCF = 営業CF + 設備投資（yfinanceでは負値）"""
+    try:
+        cf = ticker.cashflow
+        if cf is None or cf.empty:
+            return None
+
+        def _col(names, idx):
+            for n in names:
+                if n in cf.index:
+                    v = cf.loc[n].iloc[idx]
+                    if v is not None and not pd.isna(v):
+                        return float(v)
+            return None
+
+        OCF_NAMES  = ["Operating Cash Flow", "Total Cash From Operating Activities",
+                      "Cash Flow From Continuing Operating Activities"]
+        CAP_NAMES  = ["Capital Expenditure", "Capital Expenditures"]
+        DIV_NAMES  = ["Cash Dividends Paid", "Common Stock Dividend Paid",
+                      "Cash Dividend Paid"]
+
+        fcf_list = []
+        for idx in range(min(4, len(cf.columns))):
+            ocf   = _col(OCF_NAMES, idx)
+            capex = _col(CAP_NAMES, idx)
+            if ocf is not None and capex is not None:
+                fcf_list.append(ocf + capex)
+        if not fcf_list:
+            return None
+        fcf_avg = sum(fcf_list) / len(fcf_list)
+
+        div_paid = _col(DIV_NAMES, 0)
+        if div_paid is None or div_paid == 0:
+            shares = info.get("sharesOutstanding") or 0
+            if div_rate and shares:
+                div_paid = -abs(div_rate * shares)
+            else:
+                return None
+        div_total = abs(div_paid)
+        if div_total <= 0:
+            return None
+        return round(fcf_avg / div_total, 2)
+    except Exception:
+        return None
+
+
+def compute_axis_scores(d):
+    """4軸スコア（各25点満点）を計算する。
+    d のキー: cut_count, years_checked, is_increasing, trend_ratio,
+    consecutive_increase, consecutive_noncut, payout, fcf_cov,
+    eq_ratio, de_ratio, roe, is_finance, rev_g, ear_g, t_eps, f_eps, dy
+    データ欠損は 0点ではなく中立点（小項目の半分）を原則とする。"""
+    # ---- 軸1: 配当持続性 ----
+    s = 0.0
+    cc = d["cut_count"]
+    s += 10 if cc == 0 else (6 if cc == 1 else 2)
+    if d["years_checked"] == 0:
+        s += 2.5
+    else:
+        nc = d["consecutive_noncut"]
+        s += 5 if nc >= 10 else (4 if nc >= 5 else (3 if nc >= 3 else (1 if nc >= 1 else 0)))
+    p = d["payout"]
+    s += 6 if p <= 60 else (4 if p <= 75 else (2 if p <= 90 else 0))
+    fcf = d["fcf_cov"]
+    if fcf is None:
+        s += 2
+    else:
+        s += 4 if fcf >= 1.5 else (3 if fcf >= 1.0 else (1 if fcf >= 0.5 else 0))
+    sustain = s
+
+    # ---- 軸2: 財務健全性 ----
+    f = 0.0
+    eq, fin = d["eq_ratio"], d["is_finance"]
+    if fin or eq is None:
+        f += 5  # 金融は構造的に低いため中立点。取得失敗時も中立点
+    else:
+        f += 10 if eq >= 60 else (7 if eq >= 40 else (4 if eq >= 30 else (2 if eq >= 20 else 0)))
+    de = d["de_ratio"]
+    if fin or de is None:
+        f += 4
+    else:
+        f += 8 if de <= 0.5 else (5 if de <= 1.0 else (3 if de <= 2.0 else 0))
+    roe = d["roe"]
+    if roe is None:
+        f += 3.5
+    else:
+        f += 7 if roe >= 10 else (5 if roe >= 8 else (3 if roe >= 5 else 0))
+    finance = f
+
+    # ---- 軸3: 成長性 ----
+    g = 0.0
+    if d["years_checked"] < 2:
+        g += 4
+    elif d["is_increasing"]:
+        g += 8
+    elif d["trend_ratio"] is not None and d["trend_ratio"] >= 0.95:
+        g += 4
+    te, fe = d["t_eps"], d["f_eps"]
+    if te is not None and fe is not None and te > 0:
+        gr = (fe - te) / te * 100
+        g += 6 if gr >= 10 else (4 if gr >= 0 else (2 if gr >= -10 else 0))
+    elif te is not None and fe is not None and te <= 0 < fe:
+        g += 6  # 黒字転換見込み
+    else:
+        g += 3
+    rg = d["rev_g"]
+    if rg is None:
+        g += 3
+    else:
+        rp = rg * 100
+        g += 6 if rp >= 5 else (4 if rp >= 0 else (2 if rp >= -5 else 0))
+    eg = d["ear_g"]
+    if eg is None:
+        g += 2.5
+    else:
+        ep = eg * 100
+        g += 5 if ep >= 5 else (3 if ep >= 0 else (1 if ep >= -5 else 0))
+    growth = g
+
+    # ---- 軸4: 還元魅力 ----
+    r = 0.0
+    dy = d["dy"]
+    r += 10 if dy >= 4.5 else (8 if dy >= 4.0 else (6 if dy >= 3.5 else (4 if dy >= 3.0 else 2)))
+    if 40 <= p <= 70:
+        r += 6
+    elif 30 <= p < 40 or 70 < p <= 80:
+        r += 4
+    elif 20 <= p < 30 or p > 80:
+        r += 2
+    ci = d["consecutive_increase"]
+    r += 5 if ci >= 5 else (4 if ci >= 3 else (2 if ci >= 1 else 0))
+    tr = d["trend_ratio"]
+    if tr is None:
+        r += 2
+    else:
+        r += 4 if tr >= 1.3 else (3 if tr >= 1.15 else (2 if tr >= 1.05 else 0))
+    return_ = r
+
+    return sustain, finance, growth, return_
 
 def fetch_info_retry(symbol):
     session = get_robust_session()
@@ -585,26 +786,29 @@ def analyze(symbol, industry, forced=False):
         print("    reason: low yield=" + str(dy))
         return {"excluded": True, "reason": "利回り" + str(dy) + "%<" + str(MIN_YIELD) + "%", "dy": dy}
 
-    score   = 5
     reasons = []
 
     if forced and dy < MIN_YIELD:
-        score -= 1
         reasons.append("利回り" + str(dy) + "%(低め)")
 
-    cut_count, years_checked, is_increasing, div_detail, annual_list, consecutive_increase, last_year_cut, cut_years = check_dividend_history(ticker)
+    hist = check_dividend_history(ticker)
+    cut_count            = hist["cut_count"]
+    years_checked        = hist["years_checked"]
+    is_increasing        = hist["is_increasing"]
+    consecutive_increase = hist["consecutive_increase"]
+    last_year_cut        = hist["last_year_cut"]
+    cut_years            = hist["cut_years"]
     div_history = make_div_history_str(cut_count, years_checked, is_increasing)
-    div_trend   = json.dumps(annual_list) if annual_list else "[]"
+    div_trend   = json.dumps(hist["annual_list"]) if hist["annual_list"] else "[]"
 
     _cut_yr_str = "(" + "・".join(cut_years) + "年)" if cut_years else ""
     if cut_count >= 2:
         if is_increasing:
-            score -= 2
             note = "減配歴" + str(cut_count) + "回" + _cut_yr_str + "(増配傾向継続)"
             if consecutive_increase > 0:
                 note += "/連続増配" + str(consecutive_increase) + "年"
             reasons.append(note)
-            print("    div cut " + str(cut_count) + " but increasing trend: include with penalty")
+            print("    div cut " + str(cut_count) + " but increasing trend: include")
         else:
             print("    reason: div cut " + str(cut_count) + " times no increasing trend")
             return {"excluded": True, "reason": "減配" + str(cut_count) + "回" + _cut_yr_str + "・増配傾向なし", "dy": dy}
@@ -617,6 +821,8 @@ def analyze(symbol, industry, forced=False):
         reasons.append("配当歴取得不可")
     elif 0 < years_checked < 10:
         reasons.append("配当歴" + str(years_checked) + "年(10年未満)")
+    if hist["special_suspect_years"]:
+        reasons.append("特別配当の可能性(" + "・".join(hist["special_suspect_years"]) + "年)")
 
     # 当年配当確定分：前年同期比チェック（減配確定は除外、前年減配+今年増配未確認も除外）
     curr_year_increase = False
@@ -656,49 +862,69 @@ def analyze(symbol, industry, forced=False):
         print("    reason: " + str(prev_yr) + "年減配・今年増配未確認")
         return {"excluded": True, "reason": str(prev_yr) + "年減配・今年増配未確認", "dy": dy}
 
-    rev_g = info.get("revenueGrowth")
-    ear_g = info.get("earningsGrowth")
-    if rev_g is not None:
-        if rev_g < 0:
-            score -= 1
-            reasons.append("売上減(" + str(round(rev_g * 100, 1)) + "%)")
-    elif ear_g is not None:
-        if ear_g < 0:
-            score -= 1
-            reasons.append("利益減(" + str(round(ear_g * 100, 1)) + "%)")
-    else:
-        reasons.append("成長データ不明")
-
     t_eps = info.get("trailingEps")
     f_eps = info.get("forwardEps")
     eps_str = make_eps_str(t_eps, f_eps)
 
-    payout = get_payout_ratio(info, ticker)
-    if payout == 0:
-        print("    reason: payout cannot be calculated")
-        return {"excluded": True, "reason": "配当性向計算不可(EPS不明)", "dy": dy}
+    payout, payout_err = get_payout_ratio(info, ticker)
+    if payout is None:
+        print("    reason: payout cannot be calculated: " + payout_err)
+        return {"excluded": True, "reason": "配当性向計算不可(" + payout_err + ")", "dy": dy}
+
+    if payout > 100:
+        print("    reason: payout=" + str(round(payout)) + "% over EPS")
+        return {"excluded": True, "reason": "配当性向" + str(round(payout)) + "%(EPS超過配当)", "dy": dy}
 
     if payout > 70:
-        ok, note = check_payout_recovery(info)
-        if not ok:
-            print("    reason: payout=" + str(round(payout)) + "% no recovery")
-            return {"excluded": True, "reason": "配当性向" + str(round(payout)) + "%・回復見込みなし", "dy": dy}
-        score -= 1
-        reasons.append("配当性向" + str(round(payout)) + "%(一時的)")
-        reasons.append(note)
-    elif payout < 30:
-        score -= 1
-        reasons.append("配当性向" + str(round(payout)) + "%(低)")
+        ok, rec_note = check_payout_recovery(info)
+        if ok:
+            reasons.append("配当性向" + str(round(payout)) + "%(高水準)")
+            reasons.append(rec_note)
+        else:
+            reasons.append("配当性向" + str(round(payout)) + "%(高水準)")
+
+    if info.get("revenueGrowth") is None and info.get("earningsGrowth") is None:
+        reasons.append("成長データ不明")
 
     is_finance = any(x in industry for x in ["銀行", "保険", "証券", "その他金融"])
-    eq_ratio   = get_equity_ratio(info, ticker, is_finance)
-    if eq_ratio > 0 and eq_ratio < 40 and not is_finance:
-        score -= 1
-        reasons.append("自己資本" + str(eq_ratio) + "%")
+    eq_ratio   = get_equity_ratio(info, ticker)
+
+    div_rate_for_fcf = info.get("dividendRate") or info.get("trailingAnnualDividendRate") or (dy * price / 100 if dy > 0 else 0)
+    fcf_cov = get_fcf_coverage(ticker, info, div_rate_for_fcf)
+    if fcf_cov is not None and fcf_cov < 0.5:
+        reasons.append("FCFカバレッジ低(" + str(fcf_cov) + "倍)")
+    if eq_ratio is not None and not is_finance and eq_ratio < 20:
+        reasons.append("自己資本" + str(eq_ratio) + "%(低)")
+
+    de_raw  = info.get("debtToEquity")
+    de_ratio = round(de_raw / 100, 3) if de_raw is not None else None
+    roe_raw = info.get("returnOnEquity")
+    roe_pct = round(roe_raw * 100, 1) if roe_raw is not None else None
+
+    sustain, finance_s, growth, return_s = compute_axis_scores({
+        "cut_count": cut_count,
+        "years_checked": years_checked,
+        "is_increasing": is_increasing,
+        "trend_ratio": hist["trend_ratio"],
+        "consecutive_increase": consecutive_increase,
+        "consecutive_noncut": hist["consecutive_noncut"],
+        "payout": payout,
+        "fcf_cov": fcf_cov,
+        "eq_ratio": eq_ratio,
+        "de_ratio": de_ratio,
+        "roe": roe_pct,
+        "is_finance": is_finance,
+        "rev_g": info.get("revenueGrowth"),
+        "ear_g": info.get("earningsGrowth"),
+        "t_eps": t_eps,
+        "f_eps": f_eps,
+        "dy": dy,
+    })
+    total = int(round(sustain + finance_s + growth + return_s))
+    star  = max(1, min(5, int(total / 20 + 0.5)))
+    judge = "〇" if star >= 4 else ("△" if star >= 2 else "×")
 
     m_cap = info.get("marketCap") or 0
-    star  = max(1, score)
-    judge = "〇" if star >= 4 else ("△" if star >= 2 else "×")
     code4 = symbol.replace(".T", "")
     yutai = get_yutai(code4)
 
@@ -706,12 +932,16 @@ def analyze(symbol, industry, forced=False):
         "excluded":    False,
         "dy":          dy,
         "payout":      round(payout, 1),
-        "eq":          eq_ratio,
+        "eq":          eq_ratio if eq_ratio is not None else 0,
         "mcap":        round(m_cap / 100000000) if m_cap else 0,
         "judge":       judge,
         "stars":       "★" * star + "☆" * (5 - star),
         "note":        " / ".join(reasons) if reasons else "良好(指標クリア)",
-        "score":       star,
+        "score":       total,
+        "score_sustain": round(sustain, 1),
+        "score_finance": round(finance_s, 1),
+        "score_growth":  round(growth, 1),
+        "score_return":  round(return_s, 1),
         "m_cap":       m_cap,
         "yutai":       yutai,
         "div_history": div_history,
@@ -824,7 +1054,8 @@ def main():
                     scan_id, now, r["industry"], r["code"], r["name"],
                     r["dy"], r["payout"], r["eq"], r["mcap"],
                     r["judge"], r["stars"], r["note"], r["score"], r.get("yutai", "-"),
-                    r.get("div_history", "-"), r.get("eps_str", "-"), r.get("div_trend", "[]")
+                    r.get("div_history", "-"), r.get("eps_str", "-"), r.get("div_trend", "[]"),
+                    r.get("score_sustain", 0), r.get("score_finance", 0), r.get("score_growth", 0), r.get("score_return", 0)
                 ))
             save_results_batch(new_rows, scan_id)
             total_count += len(new_rows)
@@ -848,7 +1079,8 @@ def main():
                 scan_id, now, r["industry"], r["code"], r["name"],
                 r["dy"], r["payout"], r["eq"], r["mcap"],
                 r["judge"], r["stars"], r["note"], r["score"], r.get("yutai", "-"),
-                r.get("div_history", "-"), r.get("eps_str", "-"), r.get("div_trend", "[]")
+                r.get("div_history", "-"), r.get("eps_str", "-"), r.get("div_trend", "[]"),
+                r.get("score_sustain", 0), r.get("score_finance", 0), r.get("score_growth", 0), r.get("score_return", 0)
             ))
         save_results_batch(shosha_rows, scan_id)
         total_count += len(shosha_rows)
