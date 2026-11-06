@@ -704,9 +704,38 @@ def _parse_yutai_html(html):
     return shares_text, month_text
 
 
+def _parse_nikkei_yutai(html):
+    """
+    日経の株主優待ページをパースし、(最低株数テキスト, 権利確定月テキスト) を返す。
+    日経は「権利確定 2・8月」のように複数月をまとめて表記する。
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    text = soup.get_text(" ", strip=True)
+
+    months = []
+    for m in re.finditer(r"権利確定\s*([0-9]{1,2}(?:・[0-9]{1,2})*)月", text):
+        for part in m.group(1).split("・"):
+            v = int(part)
+            if 1 <= v <= 12 and v not in months:
+                months.append(v)
+    months.sort()
+    month_text = "・".join(str(v) + "月" for v in months)
+
+    shares_text = ""
+    nums = []
+    for m in re.finditer(r"([0-9][0-9,]*)株以上", text):
+        n = int(m.group(1).replace(",", ""))
+        if 1 <= n <= 100000:
+            nums.append(n)
+    if nums:
+        shares_text = f"{min(nums):,}株以上"
+
+    return shares_text, month_text
+
+
 def get_yutai(code4):
     """
-    株主優待情報を取得。kabutan.jp → minkabu.jp の順で試みる。
+    株主優待情報を取得。日経 → kabutan.jp → minkabu.jp の順で試みる。
     - 明示的に「なし」と確認できた場合のみ「なし」を返す
     - パース成功時は「XXX株以上 / X月」形式
     - 判定できなかった場合は「-」（不明）を返す
@@ -725,10 +754,11 @@ def get_yutai(code4):
         "株主優待はございません",
     ]
     urls = [
-        f"https://kabutan.jp/stock/yutai?code={code4}",
-        f"https://minkabu.jp/stock/{code4}/yutai",
+        ("nikkei", f"https://www.nikkei.com/nkd/company/yutai/?scode={code4}"),
+        ("kabutan", f"https://kabutan.jp/stock/yutai?code={code4}"),
+        ("minkabu", f"https://minkabu.jp/stock/{code4}/yutai"),
     ]
-    for url in urls:
+    for source, url in urls:
         try:
             sess = get_robust_session()
             time.sleep(0.8 + random.uniform(0.2, 0.6))
@@ -738,6 +768,21 @@ def get_yutai(code4):
                 continue
 
             html = resp.text
+
+            # 日経は形式が異なるため専用に処理する
+            if source == "nikkei":
+                soup_text = BeautifulSoup(html, "html.parser").get_text(" ", strip=True)
+                if "該当する企業の優待情報がありません" in soup_text:
+                    print(f"    yutai {code4}: なし(明示・日経)")
+                    return "なし"
+                shares_text, month_text = _parse_nikkei_yutai(html)
+                if month_text:
+                    parts = [p for p in [shares_text, month_text] if p]
+                    result = " / ".join(parts)
+                    print(f"    yutai {code4}: {result} (日経)")
+                    return result
+                print(f"    yutai {code4}: 月情報なし、次URL試行")
+                continue
 
             # 「なし」が明示されている場合
             if any(marker in html for marker in NO_YUTAI):
