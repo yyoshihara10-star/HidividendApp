@@ -186,7 +186,7 @@ def update_history(scan_id, started_at, finished_at, count, status):
     conn.close()
 
 def fetch_jpx_prime():
-    url = "https://www.jpx.co.jp/markets/statistics-equities/misc/tvdivq0000001vg2-att/data_j.xls"
+    url = "https://www.jpx.co.jp/markets/statistics-equities/misc/tvdivq0000001vg2-att/data_j.xlsx"
     df = pd.read_excel(url, header=0)
     col_map = {}
     for col in df.columns:
@@ -1001,12 +1001,14 @@ def main():
     try:
         df, col_map = fetch_jpx_prime()
     except Exception as e:
+        print("ERROR: fetch_jpx_prime failed: " + str(e))
         set_status("state",   "done")
         update_history(scan_id, started_at, now_jst(), 0, "error")
         return
 
     missing = [k for k in ["market", "industry", "code", "name"] if k not in col_map]
     if missing:
+        print("ERROR: missing columns in JPX data: " + str(missing))
         set_status("state",   "done")
         update_history(scan_id, started_at, now_jst(), 0, "error")
         return
@@ -1026,6 +1028,7 @@ def main():
     all_industries = sorted(non_shosha_df[col_map["industry"]].dropna().unique())
 
     if len(all_industries) == 0:
+        print("ERROR: no industries found in JPX data")
         set_status("state",   "done")
         update_history(scan_id, started_at, now_jst(), 0, "error")
         return
