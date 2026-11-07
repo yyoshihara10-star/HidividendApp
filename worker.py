@@ -525,6 +525,13 @@ def compute_axis_scores(d):
     else:
         s += 4 if fcf >= 1.5 else (3 if fcf >= 1.0 else (1 if fcf >= 0.5 else 0))
     sustain = s
+    # FCFカバレッジが弱い銘柄は持続性をキャップする（配当がフリーキャッシュフローで
+    # 裏付けられていない銘柄は、他の指標が良くても高得点にしない。2026-11-07追加）
+    if fcf is not None:
+        if fcf < 0.5:
+            sustain = min(sustain, 12)
+        elif fcf < 1.0:
+            sustain = min(sustain, 18)
 
     # ---- 軸2: 財務健全性 ----
     f = 0.0
@@ -1002,6 +1009,18 @@ def analyze(symbol, industry, forced=False):
         else:
             reasons.append("配当性向" + str(round(payout)) + "%(高水準)")
 
+    # スコア用配当性向: 前方（予想EPSベース）も見て、厳しい方を採用する。
+    # 実績EPSだけだと利益減速局面で性向が低く見え、増配の持続性を過大評価するため（2026-11-07追加）
+    fwd_payout = None
+    div_for_fwd = div if div else 0
+    if not div_for_fwd:
+        div_for_fwd, _fs = resolve_annual_dividend(info, ticker, None, fetch_nikkei=False)
+    if f_eps and f_eps > 0 and div_for_fwd:
+        fwd_payout = round(div_for_fwd / f_eps * 100, 1)
+    payout_score = max(payout, fwd_payout) if fwd_payout is not None else payout
+    if fwd_payout is not None and fwd_payout > 80:
+        reasons.append("前方配当性向" + str(fwd_payout) + "%(高水準)")
+
     if info.get("revenueGrowth") is None and info.get("earningsGrowth") is None:
         reasons.append("成長データ不明")
 
@@ -1027,7 +1046,7 @@ def analyze(symbol, industry, forced=False):
         "trend_ratio": hist["trend_ratio"],
         "consecutive_increase": consecutive_increase,
         "consecutive_noncut": hist["consecutive_noncut"],
-        "payout": payout,
+        "payout": payout_score,
         "fcf_cov": fcf_cov,
         "eq_ratio": eq_ratio,
         "de_ratio": de_ratio,
