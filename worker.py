@@ -372,8 +372,8 @@ def make_eps_str(t_eps, f_eps):
         return str(t_r) + "円(予想なし)"
     return "-"
 
-def get_payout_ratio(info, ticker):
-    """(配当性向, 計算不能理由) を返す。計算できれば (値, "")"""
+def get_payout_ratio(info, ticker, div=None):
+    """(配当性向, 計算不能理由) を返す。計算できれば (値, "")。div は年間1株配当（解決済みなら渡す）"""
     f_eps = info.get("forwardEps")
     t_eps = info.get("trailingEps")
 
@@ -388,17 +388,10 @@ def get_payout_ratio(info, ticker):
     else:
         return None, "EPSデータ欠損"
 
-    div_rate = info.get("dividendRate") or info.get("trailingAnnualDividendRate") or 0
-
-    if div_rate == 0:
-        try:
-            divs = ticker.dividends
-            if divs is not None and len(divs) > 0:
-                divs.index = divs.index.tz_localize(None) if divs.index.tzinfo else divs.index
-                cutoff = pd.Timestamp.now() - pd.DateOffset(years=1)
-                div_rate = divs[divs.index >= cutoff].sum()
-        except:
-            pass
+    if div is not None:
+        div_rate = div
+    else:
+        div_rate, _src = resolve_annual_dividend(info, ticker, None, fetch_nikkei=False)
 
     if div_rate <= 0:
         return None, "配当データ欠損"
@@ -631,8 +624,74 @@ def fetch_info_retry(symbol):
                 return None, None
     return None, None
 
-def get_dividend_yield(info, ticker, price):
-    """利回りを計算。dividendRateが取れない場合はdividendsの直近1年合計を使用"""
+def get_nikkei_forecast_dividend(code4):
+    """日経の会社ページから予想配当利回りと現在値を取得し、年間予想配当（円/株）を推定して返す。
+    戻り値: (年間予想配当, 予想配当利回り) / 取得失敗時は (None, None)
+    ※ 日経の予想配当利回りは会社予想ベースで、株探の表示利回りとも一致することを確認済み（2026-11-07）。
+    """
+    try:
+        sess = get_robust_session()
+        time.sleep(0.5 + random.uniform(0.1, 0.4))
+        resp = sess.get(f"https://www.nikkei.com/nkd/company/?scode={code4}", timeout=15)
+        if resp.status_code != 200:
+            print(f"    nikkei div {code4}: HTTP {resp.status_code}")
+            return None, None
+        html = resp.text
+        ym = re.search(r"予想配当利回り</a>.*?<span class=\"m-stockInfo_detail_value\">([\d.]+)", html, re.S)
+        pm = re.search(r"<dd class=\"m-stockPriceElm_value now\">([\d,]+(?:\.\d+)?)<span", html)
+        if not ym or not pm:
+            print(f"    nikkei div {code4}: parse failed")
+            return None, None
+        nk_yield = float(ym.group(1))
+        nk_price = float(pm.group(1).replace(",", ""))
+        if nk_yield <= 0 or nk_price <= 0:
+            return None, None
+        return round(nk_yield * nk_price / 100, 2), nk_yield
+    except Exception as e:
+        print(f"    nikkei div {code4}: error {str(e)[:60]}")
+        return None, None
+
+
+def resolve_annual_dividend(info, ticker, code4, fetch_nikkei=True):
+    """年間1株配当（円）を決定し、(配当額, 出所) を返す。決まらなければ (0, "")。
+    優先順位: 日経の予想配当（会社予想ベース）→ Yahoo dividendRate（実績との乖離ガード付き）
+              → Yahoo trailingAnnualDividendRate → 配当実績の直近1年合計
+    ※ Yahoo の dividendRate は銘柄により実績と大きく乖離する（例: 6136 オーエスジーで
+      実績71円に対し182円、2026-11-07 実測）ため、主ソースにせず照合して使う。
+    """
+    if fetch_nikkei and code4:
+        div, _nk_yield = get_nikkei_forecast_dividend(code4)
+        if div and div > 0:
+            return div, "nikkei"
+    div_rate = info.get("dividendRate") or 0
+    trailing = info.get("trailingAnnualDividendRate") or 0
+    if div_rate > 0:
+        if trailing > 0 and div_rate > trailing * 1.5:
+            # Yahoo の予想が実績と大きく乖離 → 実績ベースにフォールバック
+            return trailing, "yahoo-guard"
+        return div_rate, "yahoo"
+    if trailing > 0:
+        return trailing, "yahoo-trailing"
+    try:
+        divs = ticker.dividends
+        if divs is not None and len(divs) > 0:
+            divs.index = divs.index.tz_localize(None) if divs.index.tzinfo else divs.index
+            cutoff = pd.Timestamp.now() - pd.DateOffset(years=1)
+            s = divs[divs.index >= cutoff].sum()
+            if s > 0:
+                return float(s), "yahoo-divs"
+    except Exception:
+        pass
+    return 0, ""
+
+
+def get_dividend_yield(info, ticker, price, div=None):
+    """利回りを計算。div（年間1株配当）が渡されればそれを使う。
+    div がなければ従来通り Yahoo の dividendRate 等から計算する（一次判定用。
+    ここでは乖離ガードを適用しない: ガード適用後の値で足切り判定すると、
+    日経での再確定が必要な銘柄まで落としてしまうため）"""
+    if div is not None:
+        return round(div / price * 100, 2) if div > 0 else 0.0
     div_rate = info.get("dividendRate") or info.get("trailingAnnualDividendRate") or 0
     if div_rate > 0:
         return round(div_rate / price * 100, 2)
@@ -821,7 +880,17 @@ def analyze(symbol, industry, forced=False):
         print("    reason: no price")
         return {"excluded": True, "reason": "株価データなし", "dy": 0}
 
+    code4 = symbol.replace(".T", "")
     dy = get_dividend_yield(info, ticker, price)
+
+    # 案B（2026-11-07）: 足切り近辺以上の銘柄は、日経の予想配当（会社予想ベース）で
+    # 年間配当を確定し、利回り・配当性向・FCFカバレッジをその配当額で統一計算する。
+    div = None
+    div_src = ""
+    if forced or dy >= MIN_YIELD - 0.5:
+        div, div_src = resolve_annual_dividend(info, ticker, code4)
+        if div:
+            dy = round(div / price * 100, 2)
 
     if dy > 30:
         print("    reason: abnormal yield=" + str(dy))
@@ -832,6 +901,11 @@ def analyze(symbol, industry, forced=False):
         return {"excluded": True, "reason": "利回り" + str(dy) + "%<" + str(MIN_YIELD) + "%", "dy": dy}
 
     reasons = []
+
+    if div_src == "yahoo-guard":
+        reasons.append("利回りは実績配当ベース(Yahoo予想配当と乖離大)")
+    elif div_src.startswith("yahoo"):
+        reasons.append("配当はYahooベース(日経取得失敗)")
 
     if forced and dy < MIN_YIELD:
         reasons.append("利回り" + str(dy) + "%(低め)")
@@ -911,7 +985,7 @@ def analyze(symbol, industry, forced=False):
     f_eps = info.get("forwardEps")
     eps_str = make_eps_str(t_eps, f_eps)
 
-    payout, payout_err = get_payout_ratio(info, ticker)
+    payout, payout_err = get_payout_ratio(info, ticker, div if div else None)
     if payout is None:
         print("    reason: payout cannot be calculated: " + payout_err)
         return {"excluded": True, "reason": "配当性向計算不可(" + payout_err + ")", "dy": dy}
@@ -934,7 +1008,7 @@ def analyze(symbol, industry, forced=False):
     is_finance = any(x in industry for x in ["銀行", "保険", "証券", "その他金融"])
     eq_ratio   = get_equity_ratio(info, ticker)
 
-    div_rate_for_fcf = info.get("dividendRate") or info.get("trailingAnnualDividendRate") or (dy * price / 100 if dy > 0 else 0)
+    div_rate_for_fcf = div if div else (info.get("dividendRate") or info.get("trailingAnnualDividendRate") or (dy * price / 100 if dy > 0 else 0))
     fcf_cov = get_fcf_coverage(ticker, info, div_rate_for_fcf)
     if fcf_cov is not None and fcf_cov < 0.5:
         reasons.append("FCFカバレッジ低(" + str(fcf_cov) + "倍)")
