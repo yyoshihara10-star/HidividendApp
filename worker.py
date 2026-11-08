@@ -288,6 +288,15 @@ def check_dividend_history(ticker):
         result["cut_count"] = cut_count
         result["cut_years"] = cut_years
 
+        # 直近連続増配年数（前年比で増えている年が何年続いているか）
+        consecutive_increase = 0
+        for i in range(len(annual) - 1, 0, -1):
+            if annual.iloc[i] > annual.iloc[i - 1]:
+                consecutive_increase += 1
+            else:
+                break
+        result["consecutive_increase"] = consecutive_increase
+
         is_increasing = False
         trend_ratio = None
         if len(annual) >= 3:
@@ -300,7 +309,12 @@ def check_dividend_history(ticker):
             trend_up  = early_avg > 0 and late_avg > early_avg * 1.05
             # 直近年が前年から5%超下落していれば増配傾向とみなさない
             recent_ok = annual.iloc[-1] >= annual.iloc[-2] * 0.95
-            if trend_up and recent_ok:
+            # 回復型（2026-11-08追加）: 谷を打ってから3年以上連続で増配し、直近年が
+            # 前半のピーク以上に戻していれば増配傾向とみなす。前半/後半の平均比較だけだと
+            # 谷の年が後半に含まれるV字回復銘柄（コロナ禍の減配からの回復など）が
+            # 一律に「増配傾向なし」になる問題への対処
+            recovery  = consecutive_increase >= 3 and annual.iloc[-1] >= annual.iloc[:mid].max()
+            if (trend_up or recovery) and recent_ok:
                 is_increasing = True
         elif len(annual) >= 2:
             if annual.iloc[-1] > annual.iloc[0] * 1.05:
@@ -309,15 +323,6 @@ def check_dividend_history(ticker):
                 trend_ratio = round(annual.iloc[-1] / annual.iloc[0], 3)
         result["is_increasing"] = is_increasing
         result["trend_ratio"]   = trend_ratio
-
-        # 直近連続増配年数（前年比で増えている年が何年続いているか）
-        consecutive_increase = 0
-        for i in range(len(annual) - 1, 0, -1):
-            if annual.iloc[i] > annual.iloc[i - 1]:
-                consecutive_increase += 1
-            else:
-                break
-        result["consecutive_increase"] = consecutive_increase
 
         # 直近の非減配継続年数（5%超の下落がない状態が何年続いているか、年数ベース）
         noncut_steps = 0
