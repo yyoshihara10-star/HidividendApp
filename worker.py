@@ -19,6 +19,7 @@ sys.stdout.reconfigure(line_buffering=True)
 
 SOGO_SHOSHA_CODES = {8058, 8031, 8001, 8053, 8002, 8015, 2768}
 MIN_YIELD  = 3.0
+MIN_MCAP_OKU = 300  # 時価総額の足切り（億円）。長期高配当投資の対象規模の下限（2026-11-08追加）
 INFO_WAIT  = 1.0
 MAX_RETRY  = 4  # リトライ回数を少し増やして粘り強くしました
 DB_PATH    = "results.db"
@@ -206,12 +207,13 @@ def fetch_jpx_prime():
     return df, col_map
 
 def get_sector_targets(sector_df, col_map):
+    # 2026-11-08: 業種ごとの上位30銘柄キャップを撤廃（規模順ソートは維持し全銘柄を解析する）
     df = sector_df.copy()
 
     if "size_code" in col_map and col_map["size_code"] in df.columns:
         df["_sort"] = pd.to_numeric(df[col_map["size_code"]], errors="coerce").fillna(99)
         df = df.sort_values("_sort")
-        return df.head(30)
+        return df
 
     if "size" in col_map and col_map["size"] in df.columns:
         def size_rank(v):
@@ -226,9 +228,9 @@ def get_sector_targets(sector_df, col_map):
                 return 99
         df["_sort"] = df[col_map["size"]].apply(size_rank)
         df = df.sort_values("_sort")
-        return df.head(30)
+        return df
 
-    return df.head(30)
+    return df
 
 def check_dividend_history(ticker):
     """配当履歴を分析し dict で返す（全経路で同じキーを持つ）"""
@@ -886,6 +888,15 @@ def analyze(symbol, industry, forced=False):
     if price == 0:
         print("    reason: no price")
         return {"excluded": True, "reason": "株価データなし", "dy": 0}
+
+    # 時価総額の足切り（2026-11-08追加）: 規模の下限未満は長期高配当投資の対象外として
+    # 除外記録に残す。marketCap が取得できない場合はデータ欠損として足切りしない。
+    mcap_raw = info.get("marketCap") or 0
+    if mcap_raw:
+        mcap_oku_chk = round(mcap_raw / 100000000)
+        if mcap_oku_chk < MIN_MCAP_OKU:
+            print("    reason: small mcap=" + str(mcap_oku_chk))
+            return {"excluded": True, "reason": "時価総額" + str(mcap_oku_chk) + "億円（基準未満）", "dy": 0}
 
     code4 = symbol.replace(".T", "")
     dy = get_dividend_yield(info, ticker, price)
