@@ -232,6 +232,27 @@ def get_sector_targets(sector_df, col_map):
 
     return df
 
+def fiscal_year_series(divs):
+    """配当Seriesを決算期（期別）単位に集計し (年次Series, 期末月) を返す。
+
+    暦年集計だと中間配当の導入・廃止や支払時期の変更で金額が期をまたいで移動し、
+    増配が減配に見える誤判定が起きる（例: 全国保証7164、2026-11-09に実証。
+    期別では106→120円の増配なのに暦年合計では151→125円の減配に見えた）。
+    期末月は過去の支払合計が最大の月で推定する（期末配当が最大であることが多い）。
+    Yahooの配当額は株式分割調整済みであることを7164・8111で確認済み。
+    """
+    months_total = divs.groupby(divs.index.month).sum()
+    if len(months_total) == 0:
+        return divs.resample("YE").sum(), 12
+    end_month = int(months_total.idxmax())
+    fy_year = [d.year if d.month <= end_month else d.year + 1 for d in divs.index]
+    s = pd.Series(divs.values, index=fy_year)
+    annual = s.groupby(level=0).sum().sort_index()
+    idx = pd.to_datetime([str(y) + "-" + str(end_month) + "-01" for y in annual.index]) + pd.offsets.MonthEnd(0)
+    annual.index = idx
+    return annual, end_month
+
+
 def check_dividend_history(ticker):
     """配当履歴を分析し dict で返す（全経路で同じキーを持つ）"""
     result = {
@@ -259,11 +280,10 @@ def check_dividend_history(ticker):
         if len(divs) == 0:
             return result
 
-        annual = divs.resample("YE").sum()
+        annual, _fy_end_month = fiscal_year_series(divs)
         annual = annual[annual > 0]
-        # 現在年は年途中で不完全（直近の急落に見える）ため除外
-        current_year = pd.Timestamp.now().year
-        annual = annual[annual.index.year < current_year]
+        # 進行中の期（期末日が未来）は中間配当しか入っておらず不完全なため除外
+        annual = annual[annual.index <= pd.Timestamp.now()]
 
         def _annual_data(a):
             return [[int(a.index[i].year), round(float(a.iloc[i]), 1)] for i in range(len(a))]
@@ -966,36 +986,28 @@ def analyze(symbol, industry, forced=False):
     if hist["special_suspect_years"]:
         reasons.append("特別配当の可能性(" + "・".join(hist["special_suspect_years"]) + "年)")
 
-    # 当年配当確定分：前年同期比チェック（減配確定は除外、前年減配+今年増配未確認も除外）
+    # 今期配当チェック：今期予想（解決済み div）を前期の期別実績と比較する（2026-11-09修正）
+    # 旧方式は暦年の年途中合計同士の比較で、中間配当の導入（全国保証7164）や
+    # 分割が絡むと増配でも「減配確定」になる誤判定があった。
+    # 減配確定は除外、前期減配+今期増配未確認も除外（後段の last_year_cut 判定）。
     curr_year_increase = False
     try:
-        rd = ticker.dividends
-        if rd is not None and len(rd) > 0:
-            rd = rd.copy()
-            rd.index = rd.index.tz_localize(None) if rd.index.tzinfo else rd.index
-            now    = pd.Timestamp.now()
-            cur_yr = now.year
-            curr_sum = rd[rd.index.year == cur_yr].sum()
-            if curr_sum > 0:
-                prev_sum = rd[
-                    (rd.index >= pd.Timestamp(cur_yr - 1, 1, 1)) &
-                    (rd.index <= pd.Timestamp(cur_yr - 1, now.month, now.day))
-                ].sum()
-                if prev_sum > 0:
-                    chg = (curr_sum - prev_sum) / prev_sum * 100
-                    if chg >= 5:
-                        curr_year_increase = True
-                        reasons.append(str(cur_yr) + "年増配確定(" + str(round(curr_sum, 1)) + "円/前年同期比+" + str(round(chg, 1)) + "%)")
-                    elif chg <= -5:
-                        print("    reason: " + str(cur_yr) + "年減配確定")
-                        return {"excluded": True, "reason": str(cur_yr) + "年減配確定(" + str(round(curr_sum, 1)) + "円/前年同期比" + str(round(chg, 1)) + "%)", "dy": dy}
-                    elif chg < 0:
-                        # -5%未満の減少：除外はしないが備考に記載
-                        reasons.append(str(cur_yr) + "年減配予定(" + str(round(curr_sum, 1)) + "円/前年同期比" + str(round(chg, 1)) + "%)")
-                    else:
-                        reasons.append(str(cur_yr) + "年配当確定(" + str(round(curr_sum, 1)) + "円)")
+        if div and hist["annual_list"]:
+            _prev_fy_div = hist["annual_list"][-1][1]
+            if _prev_fy_div > 0:
+                chg = (div - _prev_fy_div) / _prev_fy_div * 100
+                if chg >= 5:
+                    curr_year_increase = True
+                    reasons.append("今期増配確定(" + str(round(div, 1)) + "円/前期比+" + str(round(chg, 1)) + "%)")
+                elif chg <= -5:
+                    print("    reason: current FY dividend cut")
+                    return {"excluded": True, "reason": "今期減配確定(" + str(round(div, 1)) + "円/前期比" + str(round(chg, 1)) + "%)", "dy": dy}
+                elif chg <= -1:
+                    # -5%〜-1%の減少：除外はしないが備考に記載
+                    reasons.append("今期減配予定(" + str(round(div, 1)) + "円/前期比" + str(round(chg, 1)) + "%)")
                 else:
-                    reasons.append(str(cur_yr) + "年配当確定(" + str(round(curr_sum, 1)) + "円)")
+                    # -1%未満の変動は日経予想の逆算誤差の範囲として据え置き扱い
+                    reasons.append("今期配当確定(" + str(round(div, 1)) + "円)")
     except Exception:
         pass
 
