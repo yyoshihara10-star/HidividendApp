@@ -297,6 +297,23 @@ def check_dividend_history(ticker):
                 result["consecutive_noncut"] = 1
             return result
 
+        # 記念・特別配当の疑い（2026-11-14追加）: 前年比+15%以上の単年ジャンプで、
+        # 前年自体は穏やか（階段型の増配ではない）かつ翌年に5%以上戻した年は、
+        # 一時的な増配（記念配当等）とみなし、その年の配当を前年水準に置き換えた
+        # 調整後系列で減配・傾向を判定する。記念分の剥落を減配と数えないため。
+        # 例: 三洋貿易3176（80周年記念配当の翌期が普通配当のみで名目減になった）
+        annual_adj = annual.copy()
+        spike_years = []
+        for i in range(2, len(annual) - 1):
+            prev_v = annual.iloc[i - 1]
+            curr_v = annual.iloc[i]
+            next_v = annual.iloc[i + 1]
+            calm = annual.iloc[i - 1] < annual.iloc[i - 2] * 1.15 and annual.iloc[i - 1] >= annual.iloc[i - 2] * 0.7
+            if prev_v > 0 and calm and curr_v >= prev_v * 1.15 and next_v <= curr_v * 0.95:
+                annual_adj.iloc[i] = prev_v
+                spike_years.append(str(annual.index[i].year))
+        annual = annual_adj
+
         cut_count = 0
         cut_years = []
         for i in range(1, len(annual)):
@@ -362,7 +379,7 @@ def check_dividend_history(ticker):
             prev_v, curr_v, next_v = annual.iloc[i - 1], annual.iloc[i], annual.iloc[i + 1]
             if prev_v > 0 and curr_v > prev_v * 1.5 and next_v < curr_v * 0.7 and next_v <= prev_v * 1.15:
                 suspects.append(str(annual.index[i].year))
-        result["special_suspect_years"] = suspects
+        result["special_suspect_years"] = sorted(set(suspects) | set(spike_years))
 
         detail = "配当" + str(len(annual)) + "年確認"
         if is_increasing:
@@ -986,6 +1003,26 @@ def analyze(symbol, industry, forced=False):
     if hist["special_suspect_years"]:
         reasons.append("特別配当の可能性(" + "・".join(hist["special_suspect_years"]) + "年)")
 
+    # 記念・特別配当の評価（2026-11-14追加）: 今期予想に一時的な増配（記念配当等）が
+    # 含まれる疑いがある場合、評価（利回り・性向・FCF・スコア）は普通配当ベース
+    # （前期水準）で行い、記念配当自体は備考表示のみとする（本人の方針）。
+    # 現年分は落下が未確認のため、本物の大幅増配（例: ゴールドウインの+20.7%）を
+    # 巻き込まないよう1.5倍以上の極端なジャンプに限定する。履歴・剥落側は
+    # 静穏＋落下確認の条件つきで1.15倍から判定する。
+    eval_div = div
+    spike_current = False
+    if div and hist["annual_list"]:
+        _prev_fy = hist["annual_list"][-1][1]
+        _calm_now = len(hist["annual_list"]) < 3 or (hist["annual_list"][-2][1] < hist["annual_list"][-3][1] * 1.15 and hist["annual_list"][-2][1] >= hist["annual_list"][-3][1] * 0.7)
+        if _prev_fy and _prev_fy > 0 and div >= _prev_fy * 1.5 and _calm_now:
+            spike_current = True
+            eval_div = _prev_fy
+            dy = round(eval_div / price * 100, 2)
+            reasons.append("今期配当に記念配当等の一時的増配の疑い(評価は普通配当ベース)")
+            if not forced and dy < MIN_YIELD:
+                print("    reason: ordinary-base yield=" + str(dy))
+                return {"excluded": True, "reason": "利回り" + str(dy) + "%(普通配当ベース)<" + str(MIN_YIELD) + "%", "dy": dy}
+
     # 今期配当チェック：今期予想（解決済み div）を前期の期別実績と比較する（2026-11-09修正）
     # 旧方式は暦年の年途中合計同士の比較で、中間配当の導入（全国保証7164）や
     # 分割が絡むと増配でも「減配確定」になる誤判定があった。
@@ -995,19 +1032,33 @@ def analyze(symbol, industry, forced=False):
         if div and hist["annual_list"]:
             _prev_fy_div = hist["annual_list"][-1][1]
             if _prev_fy_div > 0:
-                chg = (div - _prev_fy_div) / _prev_fy_div * 100
+                chg = (eval_div - _prev_fy_div) / _prev_fy_div * 100
                 if chg >= 5:
                     curr_year_increase = True
-                    reasons.append("今期増配確定(" + str(round(div, 1)) + "円/前期比+" + str(round(chg, 1)) + "%)")
-                elif chg <= -5:
-                    print("    reason: current FY dividend cut")
-                    return {"excluded": True, "reason": "今期減配確定(" + str(round(div, 1)) + "円/前期比" + str(round(chg, 1)) + "%)", "dy": dy}
+                    reasons.append("今期増配確定(" + str(round(eval_div, 1)) + "円/前期比+" + str(round(chg, 1)) + "%)")
                 elif chg <= -1:
-                    # -5%〜-1%の減少：除外はしないが備考に記載
-                    reasons.append("今期減配予定(" + str(round(div, 1)) + "円/前期比" + str(round(chg, 1)) + "%)")
+                    # 記念配当等の剥落チェック（2026-11-14追加）: 前期が一時的な増配
+                    # （記念配当等）で跳ねていた場合、その分が落ちるだけの減は減配と
+                    # みなさない。今期予想が前々期（普通配当ベース）以上なら除外しない。
+                    _reclass = False
+                    if len(hist["annual_list"]) >= 2:
+                        _base_div = hist["annual_list"][-2][1]
+                        _calm_b = len(hist["annual_list"]) < 3 or (_base_div < hist["annual_list"][-3][1] * 1.15 and _base_div >= hist["annual_list"][-3][1] * 0.7)
+                        if _base_div > 0 and _prev_fy_div >= _base_div * 1.15 and _calm_b and div >= _base_div:
+                            _chg_b = (div - _base_div) / _base_div * 100
+                            reasons.append("今期配当は前期の記念配当等の剥落を含む(普通配当ベースでは前々期比+" + str(round(_chg_b, 1)) + "%)")
+                            if _chg_b >= 5:
+                                curr_year_increase = True
+                            _reclass = True
+                    if not _reclass:
+                        if chg <= -5:
+                            print("    reason: current FY dividend cut")
+                            return {"excluded": True, "reason": "今期減配確定(" + str(round(eval_div, 1)) + "円/前期比" + str(round(chg, 1)) + "%)", "dy": dy}
+                        # -5%〜-1%の減少：除外はしないが備考に記載
+                        reasons.append("今期減配予定(" + str(round(eval_div, 1)) + "円/前期比" + str(round(chg, 1)) + "%)")
                 else:
                     # -1%未満の変動は日経予想の逆算誤差の範囲として据え置き扱い
-                    reasons.append("今期配当確定(" + str(round(div, 1)) + "円)")
+                    reasons.append("今期配当確定(" + str(round(eval_div, 1)) + "円)")
     except Exception:
         pass
 
@@ -1020,7 +1071,7 @@ def analyze(symbol, industry, forced=False):
     f_eps = info.get("forwardEps")
     eps_str = make_eps_str(t_eps, f_eps)
 
-    payout, payout_err = get_payout_ratio(info, ticker, div if div else None)
+    payout, payout_err = get_payout_ratio(info, ticker, eval_div if eval_div else None)
     if payout is None:
         print("    reason: payout cannot be calculated: " + payout_err)
         return {"excluded": True, "reason": "配当性向計算不可(" + payout_err + ")", "dy": dy}
@@ -1040,7 +1091,7 @@ def analyze(symbol, industry, forced=False):
     # スコア用配当性向: 前方（予想EPSベース）も見て、厳しい方を採用する。
     # 実績EPSだけだと利益減速局面で性向が低く見え、増配の持続性を過大評価するため（2026-11-07追加）
     fwd_payout = None
-    div_for_fwd = div if div else 0
+    div_for_fwd = eval_div if eval_div else 0
     if not div_for_fwd:
         div_for_fwd, _fs = resolve_annual_dividend(info, ticker, None, fetch_nikkei=False)
     if f_eps and f_eps > 0 and div_for_fwd:
@@ -1055,7 +1106,7 @@ def analyze(symbol, industry, forced=False):
     is_finance = any(x in industry for x in ["銀行", "保険", "証券", "その他金融"])
     eq_ratio   = get_equity_ratio(info, ticker)
 
-    div_rate_for_fcf = div if div else (info.get("dividendRate") or info.get("trailingAnnualDividendRate") or (dy * price / 100 if dy > 0 else 0))
+    div_rate_for_fcf = eval_div if eval_div else (info.get("dividendRate") or info.get("trailingAnnualDividendRate") or (dy * price / 100 if dy > 0 else 0))
     fcf_cov = get_fcf_coverage(ticker, info, div_rate_for_fcf)
     if fcf_cov is not None and fcf_cov < 0.5:
         reasons.append("FCFカバレッジ低(" + str(fcf_cov) + "倍)")
